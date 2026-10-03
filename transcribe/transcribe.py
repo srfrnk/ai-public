@@ -166,8 +166,14 @@ def run_nemotron_diarization(wav_path: str, device: str) -> List[Dict[str, Any]]
     # Free Nemotron model from GPU memory to make room for Whisper & LLM
     del model
     del processor
+    import gc
+    gc.collect()
     if device == "cuda":
         torch.cuda.empty_cache()
+        try:
+            torch.cuda.ipc_collect()
+        except Exception:
+            pass
 
     normalized_segments.sort(key=lambda x: x["start"])
     print(f"   Extracted {len(normalized_segments)} speaker segments.")
@@ -218,9 +224,15 @@ def run_asr(
                 "words": words,
             })
         del model
+        import gc
+        gc.collect()
         if device == "cuda":
             import torch
             torch.cuda.empty_cache()
+            try:
+                torch.cuda.ipc_collect()
+            except Exception:
+                pass
         return asr_segments
 
     elif engine == "openai-whisper":
@@ -474,10 +486,21 @@ def process_single_file(input_file: str, args, device: str, processor=None, mode
 
         # Step 5: Automatically infer and map speakers using local LLM
         if not args.diarize_only and not args.no_map_speakers and args.format in ["txt", "md"]:
+            # Aggressively release all GPU VRAM from Diarization and ASR before starting LLM inference
+            import gc
+            gc.collect()
+            if device == "cuda":
+                try:
+                    import torch
+                    torch.cuda.empty_cache()
+                    torch.cuda.ipc_collect()
+                except Exception:
+                    pass
+
             try:
                 from map_speakers import map_transcript, apply_speaker_mapping
                 print(f"\n🧠 Inferring speaker names, summary, and file title with {args.llm_model}...")
-                mapping_result = map_transcript(out_path, model=args.llm_model)
+                mapping_result = map_transcript(out_path, model=args.llm_model, source_file=input_file)
                 if mapping_result:
                     suggested_title = mapping_result.get("suggested_title") if isinstance(mapping_result, dict) else None
                     summary = mapping_result.get("summary") if isinstance(mapping_result, dict) else None
@@ -491,7 +514,9 @@ def process_single_file(input_file: str, args, device: str, processor=None, mode
                         delete_source_txt=True,
                     )
             except Exception as e:
+                import traceback
                 print(f"⚠️  Speaker mapping skipped due to error: {e}")
+                traceback.print_exc()
 
     finally:
         if os.path.exists(wav_path):

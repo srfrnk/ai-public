@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import datetime
 import json
 import os
 import re
@@ -22,6 +23,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 from typing import Dict, Any, Optional, List
+
 
 
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
@@ -88,7 +90,7 @@ def query_ollama(prompt: str, model: str, host: str = DEFAULT_OLLAMA_URL) -> str
         headers={"Content-Type": "application/json"}
     )
     try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
+        with urllib.request.urlopen(req, timeout=600) as resp:
             body = resp.read().decode("utf-8")
             result = json.loads(body)
             # Support Qwen 3 thinking mode models if response is empty
@@ -98,20 +100,37 @@ def query_ollama(prompt: str, model: str, host: str = DEFAULT_OLLAMA_URL) -> str
             return text
     except urllib.error.URLError as e:
         raise RuntimeError(
-            f"Failed to connect to local Ollama at {host} ({e}). "
-            "Please make sure Ollama is running (`ollama serve` or system service)."
+            f"Failed to query local Ollama at {host} ({e}). "
+            "Please verify Ollama service status and GPU VRAM availability."
         )
 
 
-def build_analysis_prompt(transcript_sample: str, speaker_set: List[str]) -> str:
+def build_analysis_prompt(
+    transcript_sample: str,
+    speaker_set: List[str],
+    source_filename: Optional[str] = None,
+) -> str:
+    source_hint = ""
+    if source_filename:
+        stem = os.path.splitext(os.path.basename(source_filename))[0]
+        # Clean up any date prefix like 20250109 or 2025-01-09 from the stem for clean topical context
+        clean_stem = re.sub(r'^\d{4}[-_.]?\d{2}[-_.]?\d{2}[-_ ]*', '', stem).strip()
+        clean_stem = re.sub(r'[_\-]+', ' ', clean_stem).strip()
+        source_hint = f"\nSource Recording / File Context: \"{clean_stem or stem}\"\n"
+
     if speaker_set:
         speakers_formatted = ", ".join(speaker_set)
         example_schema = {
-            "suggested_title": "Short descriptive filename title (3 to 10 words, e.g. '2026-07-12 Kickoff Meeting with Dan and Maya')",
+            "topic": "Concise 3 to 6 word title describing the technical topic, tool, or software (e.g. pyBatch TASC Analysis Discussion)",
+            "spoken_date": {
+                "has_explicit_spoken_date": False,
+                "date": None,
+                "quote_evidence": None
+            },
             "summary": "Concise summary of the conversation covering main topics, decisions, and action items (in the conversation language).",
             "speakers": {
                 spk: {
-                    "name": "Real Name or 'Unknown'",
+                    "name": "Confirmed First Name or 'Unknown'",
                     "confidence": "high / medium / low",
                     "evidence": "Quote or reason from the transcript text"
                 }
@@ -121,7 +140,12 @@ def build_analysis_prompt(transcript_sample: str, speaker_set: List[str]) -> str
         task1_inst = f"1. Identify Speakers: Determine the real name of each speaker ({speakers_formatted}) based on introductions, greetings, and how participants address each other. If a speaker's name cannot be determined, set 'name': 'Unknown'. You MUST include an entry in 'speakers' for EVERY speaker in {speakers_formatted}."
     else:
         example_schema = {
-            "suggested_title": "Short descriptive filename title (3 to 10 words, e.g. 'Software Tutorial for Protein Expression Categorization GUI')",
+            "topic": "Concise 3 to 6 word title describing the technical topic, tool, or software",
+            "spoken_date": {
+                "has_explicit_spoken_date": False,
+                "date": None,
+                "quote_evidence": None
+            },
             "summary": "Concise summary of the tutorial/dialogue covering main topics and takeaways (in the conversation language).",
             "speakers": {}
         }
@@ -129,15 +153,12 @@ def build_analysis_prompt(transcript_sample: str, speaker_set: List[str]) -> str
 
     schema_str = json.dumps(example_schema, indent=2, ensure_ascii=False)
 
-    return f"""You are an assistant analyzing a conversation transcript.
-
+    return f"""You are an assistant analyzing a conversation transcript.{source_hint}
 Tasks:
 {task1_inst}
-2. Suggest File Title: Suggest a concise file title/name based on the conversation:
-   - Length: Exactly 3 to 10 words.
-   - Content: MUST convey the main agenda/topic of the conversation.
-   - Context: Include a date ONLY if explicitly spoken/stated in the transcript. NEVER invent, guess, or hallucinate a date (if no date is mentioned in the dialogue, do not include any date in the title). List known participants where appropriate.
-   - Format: Clean title suitable for a filename (alphanumerics, spaces, hyphens, no invalid filename characters).
+2. Technical Topic & Spoken Date (STRICT ANTI-HALLUCINATION RULES):
+   - 'topic': Provide a concise 3 to 6 word title describing the technical topic, tool, or software discussed (e.g. 'pyBatch TASC Analysis Discussion'). Do NOT include dates or personal names in 'topic'.
+   - 'spoken_date': Set 'has_explicit_spoken_date': true ONLY if participants explicitly speak a calendar date aloud in the dialogue. If true, set 'date' to 'YYYY-MM-DD' and provide the exact 'quote_evidence'. If NO calendar date was spoken aloud, you MUST set 'has_explicit_spoken_date': false, 'date': null, 'quote_evidence': null. NEVER guess, estimate, or invent a date.
 3. Summary: Provide a concise, clear summary of the conversation in the same language as the transcript (matching the predominant spoken language), capturing the agenda, key topics discussed, conclusions, and action items.
    - Grammar & Capitalization: MUST use correct grammar and sentence capitalization (always capitalize the first letter of each sentence, e.g. "The speaker...", "The presenter...").
    - CRITICAL REQUIREMENT: Do NOT use raw speaker notation or IDs (such as 'Speaker_0', 'speaker_0', 'speaker_1', etc.) anywhere in the summary. Always refer to participants by their identified real names from Task 1 (or 'The speaker' / 'the speaker' / 'the presenter' if the name is unknown).
@@ -150,6 +171,199 @@ Transcript:
 Return ONLY a valid JSON object matching this exact structure:
 {schema_str}
 """
+
+
+def extract_spoken_text_only(transcript_lines_or_text: Any) -> str:
+    """Extracts raw dialogue text, removing HTML spans, timestamps, and speaker tags."""
+    if isinstance(transcript_lines_or_text, list):
+        text = "\n".join(transcript_lines_or_text)
+    else:
+        text = str(transcript_lines_or_text)
+    # Strip span tags
+    text = re.sub(r'<[^>]+>', ' ', text)
+    # Strip timestamp brackets like [03:20 → 03:20] or [12.3s -> 15.4s]
+    text = re.sub(r'\[\s*\d+[^\]]*\s*(?:→|->|–|-)[^\]]*\]', ' ', text)
+    # Strip speaker tag brackets [speaker_0] or [Ilan]
+    text = re.sub(r'\[[^\]]+\]', ' ', text)
+    return text
+
+
+def extract_date_from_filename(filename: Optional[str]) -> Optional[str]:
+    """
+    Extracts an explicit calendar date from a filename or filepath if present.
+    Treats the filename as a reliable source of truth.
+    Supports formats:
+      - Zoom format: GMTYYYYMMDD...
+      - Delimited: YYYY-MM-DD, YYYY_MM_DD, YYYY.MM.DD
+      - Compact: YYYYMMDD (e.g. 20250109)
+    Validates calendar correctness (e.g. leap years, valid months/days) and returns 'YYYY-MM-DD'.
+    """
+    if not filename:
+        return None
+
+    stem = os.path.splitext(os.path.basename(filename))[0]
+
+    # 1. Zoom format: GMTYYYYMMDD...
+    m = re.search(r"\bGMT(\d{4})(\d{2})(\d{2})\b", stem, re.IGNORECASE)
+    if m:
+        try:
+            d = datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            return d.strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+
+    # 2. Delimited YYYY-MM-DD, YYYY_MM_DD, YYYY.MM.DD
+    m = re.search(r"(?:^|[\s_\-\.\(\[])((?:19|20)\d{2})[-_/\.](0[1-9]|1[0-2])[-_/\.](0[1-9]|[12]\d|3[01])(?:$|[\s_\-\.\)\]])", stem)
+    if m:
+        try:
+            d = datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            return d.strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+
+    # 3. Compact YYYYMMDD (bounded by non-digits or string boundaries)
+    m = re.search(r"(?:^|[^\d])((?:19|20)\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])(?:$|[^\d])", stem)
+    if m:
+        try:
+            d = datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            return d.strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+
+    return None
+
+
+def generate_clean_fallback_title(source_file: Optional[str], transcript_sample: str = "") -> str:
+    """Generates a clean descriptive fallback title if the LLM hallucinated or provided a generic title."""
+    if source_file:
+        stem = os.path.splitext(os.path.basename(source_file))[0]
+        # Strip date prefix e.g. 20250109 or 2025-01-09 or GMT20241114
+        cleaned = re.sub(r'^(?:GMT)?\d{4}[-_.]?\d{2}[-_.]?\d{2}[-_ ]*', '', stem, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r'[_\-]+', ' ', cleaned).strip()
+        cleaned = re.sub(r'\s+', ' ', cleaned)
+        if cleaned:
+            words = [w.capitalize() if w.islower() else w for w in cleaned.split()]
+            cleaned = " ".join(words)
+            lower_c = cleaned.lower()
+            if not any(w in lower_c for w in ["meeting", "discussion", "demo", "tutorial", "overview", "presentation", "analysis"]):
+                cleaned += " Discussion"
+            return cleaned
+
+    return "Meeting Discussion"
+
+
+def assemble_deterministic_title(
+    topic: Optional[str],
+    spoken_date_info: Optional[Dict[str, Any]],
+    transcript_sample: str,
+    speakers_dict: Optional[Dict[str, Any]] = None,
+    source_file: Optional[str] = None,
+) -> str:
+    """
+    Deterministically combines topic and verified date with zero tolerance for hallucinations:
+    1. Reliable Date Extraction:
+       - Uses date embedded in source filename as ground truth (e.g. 20250109 -> 2025-01-09).
+       - If no filename date, uses verified spoken date if explicitly spoken aloud in dialogue.
+       - Otherwise, no date prefix is added. Never guesses or invents dates.
+    2. Topic Sanitization:
+       - Strips generic placeholders, unconfirmed names, prompt artifacts, or leaked dates.
+       - Falls back safely to descriptive source file context if topic is missing or invalid.
+    3. Assembles clean title: '{date_prefix}{clean_topic}'.
+    """
+    # 1. Determine verified date prefix
+    verified_date_prefix = ""
+    filename_date = extract_date_from_filename(source_file)
+    if filename_date:
+        verified_date_prefix = f"{filename_date} "
+    elif spoken_date_info and isinstance(spoken_date_info, dict):
+        if spoken_date_info.get("has_explicit_spoken_date") is True:
+            candidate_date = spoken_date_info.get("date")
+            quote = spoken_date_info.get("quote_evidence")
+            spoken_text = extract_spoken_text_only(transcript_sample)
+            if candidate_date and re.match(r'^\d{4}-\d{2}-\d{2}$', str(candidate_date)):
+                if (quote and str(quote).strip() in spoken_text) or str(candidate_date) in spoken_text:
+                    verified_date_prefix = f"{candidate_date} "
+
+    # 2. Topic sanitization
+    clean_topic = ""
+    if topic and isinstance(topic, str):
+        clean_topic = topic.strip().strip('"\'`')
+        clean_topic = re.sub(r"^#+\s*", "", clean_topic).strip()
+
+        # Remove known prompt artifacts if present
+        for pattern in [r"\bwith\s+Dan\s+and\s+Maya\b", r"\bDan\s+and\s+Maya\b", r"\bKickoff Meeting with Dan and Maya\b"]:
+            clean_topic = re.sub(pattern, "", clean_topic, flags=re.IGNORECASE).strip()
+
+        # If a verified date is known, strip any redundant date prefix from the topic
+        if verified_date_prefix:
+            known_date = verified_date_prefix.strip()
+            y, m, d = known_date.split("-")
+            clean_topic = re.sub(rf"^\s*(?:GMT)?{y}[-_/\.]?{m}[-_/\.]?{d}\b\s*", "", clean_topic, flags=re.IGNORECASE)
+            clean_topic = re.sub(rf"^\s*{d}[-_/\.]?{m}[-_/\.]?{y}\b\s*", "", clean_topic, flags=re.IGNORECASE)
+            clean_topic = clean_topic.strip(" -_:,")
+
+        # Strip accidental dates in topic if not spoken in dialogue or present in filename
+        spoken_text = extract_spoken_text_only(transcript_sample)
+        date_patterns = [
+            re.compile(r'\b(19\d\d|20\d\d)[-_/.](0[1-9]|1[0-2])[-_/.](0[1-9]|[12]\d|3[01])\b'),
+            re.compile(r'\b(0[1-9]|[12]\d|3[01])[-_/.](0[1-9]|1[0-2])[-_/.](19\d\d|20\d\d)\b'),
+            re.compile(r'\b(19\d\d|20\d\d)\b'),
+        ]
+        for dp in date_patterns:
+            for match_date in reversed(list(dp.finditer(clean_topic))):
+                found_str = match_date.group(0)
+                if found_str not in spoken_text and (not filename_date or found_str not in filename_date):
+                    start, end = match_date.span()
+                    clean_topic = (clean_topic[:start] + clean_topic[end:]).strip(" -_")
+
+        # Strip unconfirmed person names
+        name_match = re.search(r'\bwith\s+([A-Za-z]+(?:\s+and\s+[A-Za-z]+)?)\b', clean_topic, re.IGNORECASE)
+        if name_match:
+            cand_names = [n.strip().lower() for n in re.split(r'\s+and\s+|\s*,\s*', name_match.group(1), flags=re.IGNORECASE) if n.strip()]
+            confirmed_names = set()
+            if speakers_dict and isinstance(speakers_dict, dict):
+                for spk_id, info in speakers_dict.items():
+                    if isinstance(info, dict):
+                        n = info.get("name")
+                        conf = str(info.get("confidence", "")).lower()
+                        if n and n != "Unknown" and conf != "low":
+                            confirmed_names.add(n.lower())
+                    elif isinstance(info, str) and info != "Unknown":
+                        confirmed_names.add(info.lower())
+
+            spoken_text_lower = spoken_text.lower()
+            all_valid = all(cn in confirmed_names or re.search(r'\b' + re.escape(cn) + r'\b', spoken_text_lower) for cn in cand_names)
+            if not all_valid:
+                clean_topic = re.sub(re.escape(name_match.group(0)), "", clean_topic, flags=re.IGNORECASE).strip(" -_")
+
+        clean_topic = re.sub(r'\s+', ' ', clean_topic).strip(" -_:,")
+
+    generic_topics = {
+        "", "meeting", "discussion", "kickoff", "kickoff meeting", "call", "session",
+        "presentation", "video", "tutorial", "demo", "zoom meeting", "transcript",
+        "meeting discussion", "software tutorial"
+    }
+
+    if not clean_topic or clean_topic.lower() in generic_topics or len(clean_topic.split()) < 2:
+        clean_topic = generate_clean_fallback_title(source_file, transcript_sample)
+
+    return f"{verified_date_prefix}{clean_topic}".strip()
+
+
+def validate_and_sanitize_title(
+    suggested_title: Optional[str],
+    transcript_sample: str,
+    speakers_dict: Optional[Dict[str, Any]] = None,
+    source_file: Optional[str] = None,
+) -> str:
+    """Wrapper ensuring backwards compatibility with any existing title string calls."""
+    return assemble_deterministic_title(
+        topic=suggested_title,
+        spoken_date_info=None,
+        transcript_sample=transcript_sample,
+        speakers_dict=speakers_dict,
+        source_file=source_file,
+    )
 
 
 def extract_speakers_from_transcript(lines: List[str]) -> List[str]:
@@ -169,6 +383,7 @@ def map_transcript(
     model: str = DEFAULT_MODEL,
     host: str = DEFAULT_OLLAMA_URL,
     max_lines: int = 250,
+    source_file: Optional[str] = None,
 ) -> Dict[str, Any]:
     # Reads ONLY the input transcript file - no other files are accessed
     with open(transcript_path, "r", encoding="utf-8") as f:
@@ -178,6 +393,15 @@ def map_transcript(
     if not speakers:
         print(f"ℹ️  No raw [speaker_X] tags found in {transcript_path} (proceeding with file title suggestion).")
 
+    # Auto-detect source media file next to transcript if not explicitly provided
+    if source_file is None:
+        stem = os.path.splitext(transcript_path)[0]
+        for ext in [".mp4", ".m4a", ".mp3", ".wav", ".mkv", ".flac", ".ogg", ".opus", ".aac", ".webm", ".avi", ".mov"]:
+            candidate = stem + ext
+            if os.path.exists(candidate):
+                source_file = candidate
+                break
+
     # Sample beginning and ending lines (where intros, conclusions, Q&A, and contact references happen)
     if len(lines) <= max_lines:
         sample_lines = lines
@@ -186,7 +410,7 @@ def map_transcript(
         sample_lines = lines[:half] + ["\n... [middle dialogue omitted] ...\n\n"] + lines[-half:]
     sample_text = "".join(sample_lines)
 
-    prompt = build_analysis_prompt(sample_text, speakers)
+    prompt = build_analysis_prompt(sample_text, speakers, source_filename=source_file)
     print(f"🧠 Querying local LLM ({model}) via Ollama...")
     try:
         raw_response = query_ollama(prompt, model=model, host=host)
@@ -199,8 +423,9 @@ def map_transcript(
             else:
                 raise RuntimeError(f"Could not parse JSON response from LLM:\n{raw_response}")
 
-        # Structure can be {"suggested_title": "...", "summary": "...", "speakers": {...}}
-        suggested_title = parsed.get("suggested_title")
+        # Structured fields
+        topic = parsed.get("topic") or parsed.get("suggested_title")
+        spoken_date_info = parsed.get("spoken_date")
         summary = parsed.get("summary")
         speakers_dict = parsed.get("speakers", parsed)
 
@@ -217,6 +442,15 @@ def map_transcript(
 
         if summary:
             summary = replace_speaker_tags_in_text(summary, name_replacements)
+
+        # Deterministically assemble title against hallucinations
+        suggested_title = assemble_deterministic_title(
+            topic=topic,
+            spoken_date_info=spoken_date_info,
+            transcript_sample=sample_text,
+            speakers_dict=speakers_dict if isinstance(speakers_dict, dict) else {},
+            source_file=source_file or transcript_path,
+        )
 
         return {
             "suggested_title": suggested_title,
@@ -646,7 +880,12 @@ def apply_speaker_mapping(
         summary = replace_speaker_tags_in_text(summary, name_replacements)
 
     saved_paths = {}
-    title_text = suggested_title or os.path.splitext(os.path.basename(transcript_path))[0]
+    title_text = validate_and_sanitize_title(
+        suggested_title,
+        "".join(lines),
+        speakers_dict if isinstance(speakers_dict, dict) else {},
+        source_file=source_file or transcript_path,
+    )
     md_content = format_markdown_transcript(title_text, summary, updated_lines, source_file=source_file)
 
     # Save to primary output path (unless it is a temporary txt file scheduled for deletion)
@@ -743,6 +982,7 @@ def main():
         model=args.model,
         host=args.host,
         max_lines=args.max_lines,
+        source_file=args.source_file,
     )
 
     suggested_title = result.get("suggested_title") if isinstance(result, dict) else None
