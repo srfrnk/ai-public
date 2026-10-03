@@ -29,7 +29,7 @@ NEMOTRON_MODEL_ID = "nvidia/Nemotron-3-Diarization"
 SUPPORTED_ASR_ENGINES = ["faster-whisper", "openai-whisper"]
 SUPPORTED_MODELS = ["tiny", "base", "small", "medium", "large-v2", "large-v3", "large-v3-turbo"]
 SUPPORTED_DEVICES = ["auto", "cuda", "cpu"]
-SUPPORTED_FORMATS = ["txt", "json", "rttm"]
+SUPPORTED_FORMATS = ["txt", "md", "json", "rttm"]
 
 
 # ---------------------------------------------------------------------------
@@ -56,8 +56,21 @@ def resolve_device(requested: str) -> str:
 # ---------------------------------------------------------------------------
 def build_output_path(input_path: str, model: str, device: str, fmt: str, diarize_only: bool = False) -> str:
     stem = os.path.splitext(input_path)[0]
-    ext = fmt if fmt in ["json", "rttm"] else "txt"
+    ext = fmt if fmt in ["json", "rttm", "md"] else "txt"
     return f"{stem}.{ext}"
+
+
+def format_timestamp(seconds: Optional[float], include_hours: bool = False) -> str:
+    """Converts seconds into MM:SS notation, or HH:MM:SS if include_hours=True or hours > 0."""
+    if seconds is None:
+        return "00:00:00" if include_hours else "00:00"
+    total_seconds = max(0, int(round(seconds)))
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    secs = total_seconds % 60
+    if include_hours or hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
 
 
 # ---------------------------------------------------------------------------
@@ -399,9 +412,11 @@ def process_single_file(input_file: str, args, device: str, processor=None, mode
                         dur = d["end"] - d["start"]
                         f.write(f"SPEAKER session 1 {d['start']:.3f} {dur:.3f} <NA> <NA> {d['speaker']} <NA> <NA>\n")
             else:
+                max_end = max((d["end"] for d in diar_segments), default=0.0)
+                include_hours = max_end >= 3600.0
                 with open(out_path, "w", encoding="utf-8") as f:
                     for d in diar_segments:
-                        line = f"[{d['start']:.2f}s → {d['end']:.2f}s] [{d['speaker']}]"
+                        line = f"[{format_timestamp(d['start'], include_hours=include_hours)} → {format_timestamp(d['end'], include_hours=include_hours)}] [{d['speaker']}]"
                         if args.print_transcript:
                             print(f"   {line}")
                         f.write(line + "\n")
@@ -437,33 +452,44 @@ def process_single_file(input_file: str, args, device: str, processor=None, mode
             with open(out_path, "w", encoding="utf-8") as f:
                 json.dump(final_transcript, f, indent=2, ensure_ascii=False)
         else:
+            max_end = max((seg["end"] for seg in final_transcript), default=0.0)
+            include_hours = max_end >= 3600.0
             with open(out_path, "w", encoding="utf-8") as f:
                 for seg in final_transcript:
                     text = seg["text"].strip()
                     speaker = seg["speaker"]
-                    prefix = ""
-                    if args.timestamps:
-                        prefix += f"[{seg['start']:.1f}s → {seg['end']:.1f}s] "
-                    prefix += f"[{speaker}] "
+                    ts_str = f"[{format_timestamp(seg['start'], include_hours=include_hours)} → {format_timestamp(seg['end'], include_hours=include_hours)}]" if args.timestamps else ""
+                    spk_str = f"[{speaker}]"
+                    prefix = f"{ts_str} {spk_str} ".lstrip()
                     line = f"{prefix}{text}".strip()
                     if args.print_transcript:
-                        print(f"   {line}")
+                        color_prefix = ""
+                        if args.timestamps:
+                            color_prefix += f"\033[36m{ts_str}\033[0m "
+                        color_prefix += f"\033[1;94m{spk_str}\033[0m "
+                        print(f"   {color_prefix}{text}".strip())
                     f.write(line + "\n")
 
         print(f"✅ Diarized transcript saved to: {out_path}")
 
         # Step 5: Automatically infer and map speakers using local LLM
-        if not args.diarize_only and not args.no_map_speakers and args.format == "txt":
+        if not args.diarize_only and not args.no_map_speakers and args.format in ["txt", "md"]:
             try:
                 from map_speakers import map_transcript, apply_speaker_mapping
-                print(f"\n🧠 Inferring speaker names and file title with {args.llm_model}...")
+                print(f"\n🧠 Inferring speaker names, summary, and file title with {args.llm_model}...")
                 mapping_result = map_transcript(out_path, model=args.llm_model)
                 if mapping_result:
                     suggested_title = mapping_result.get("suggested_title") if isinstance(mapping_result, dict) else None
+                    summary = mapping_result.get("summary") if isinstance(mapping_result, dict) else None
                     speakers = mapping_result.get("speakers", mapping_result) if isinstance(mapping_result, dict) else mapping_result
-                    if suggested_title:
-                        print(f"🏷   Suggested File Title: \033[1;36m{suggested_title}\033[0m")
-                    apply_speaker_mapping(out_path, speakers)
+                    apply_speaker_mapping(
+                        out_path,
+                        mapping_result,
+                        suggested_title=suggested_title,
+                        summary=summary,
+                        source_file=input_file,
+                        delete_source_txt=True,
+                    )
             except Exception as e:
                 print(f"⚠️  Speaker mapping skipped due to error: {e}")
 

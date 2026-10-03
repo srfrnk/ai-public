@@ -11,7 +11,7 @@
 # Overridable variables (pass on the command line):
 #   FILE       = path to a single audio/video file
 #   DIR        = path to directory containing media files (alternative to FILE)
-#   MODEL      = large-v3 (default, best Hebrew quality, fits 24GB RTX 3090)
+#   MODEL      = large-v3 (default, best multilingual quality; requires >= 8GB VRAM)
 #   LANGUAGE   = he (default, or 'auto', 'en', etc.)
 #   DEVICE     = auto (cuda GPU default, cpu fallback)
 #   LLM_MODEL  = qwen3:30b (default local LLM model for speaker mapping)

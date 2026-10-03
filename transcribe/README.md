@@ -2,16 +2,19 @@
 
 Generic audio/video speaker diarization and transcription toolkit powered by NVIDIA's
 [Nemotron-3-Diarization](https://huggingface.co/nvidia/Nemotron-3-Diarization) model paired with
-[faster-whisper](https://github.com/SYSTRAN/faster-whisper) for state-of-the-art Hebrew ASR, and local LLM speaker mapping via Ollama.
+[faster-whisper](https://github.com/SYSTRAN/faster-whisper) for state-of-the-art multilingual ASR, and local LLM speaker mapping via Ollama.
 
-Scripts live in `transcribe/`. A dedicated Python 3.12 virtual environment is placed in `/tmp/transcribe_env/`.
+A dedicated Python 3.12 virtual environment is placed in `/tmp/transcribe_env/`.
 
 ---
 
 ## Prerequisites
 
 1. **System & Drivers**:
-   - Ubuntu Linux with NVIDIA Driver supporting CUDA 12+ (tested on RTX 3090, 24GB VRAM).
+   - Ubuntu Linux with NVIDIA GPU and driver supporting CUDA 12+:
+     - **≥ 24 GB VRAM**: Recommended for the default pipeline with 30B parameter LLM speaker mapping.
+     - **≥ 12–16 GB VRAM**: Sufficient if choosing smaller LLMs (e.g., `LLM_MODEL=qwen2.5:7b` or `llama3.2:3b`).
+     - **≥ 8 GB VRAM**: Sufficient for Diarization + Whisper ASR alone.
    - `ffmpeg`, `uv`, and `ollama` (all checked and installed automatically by `make setup` if missing).
 2. **Hugging Face Token**:
    - A valid token with read access to `nvidia/Nemotron-3-Diarization` (either logged in via `huggingface-cli login` or exported in `HF_TOKEN`).
@@ -49,8 +52,8 @@ Runs the complete end-to-end pipeline on an audio or video file (`.mp4`, `.m4a`,
 2. Runs `nvidia/Nemotron-3-Diarization` to compute speaker turns and boundaries.
 3. Automatically frees diarizer GPU memory (`torch.cuda.empty_cache()`).
 4. Runs `faster-whisper` (`large-v3` by default) constrained to diarized segments.
-5. Saves the timestamped transcript (`.txt`) next to the source media file.
-6. Automatically invokes `map_speakers.py` to identify speakers, suggest a concise file title (3 to 10 words capturing agenda/topic, date, and attendants), and safely replace speaker tags in-place.
+5. Generates the intermediate timestamped transcript.
+6. Automatically invokes `map_speakers.py` to identify speakers, generate a concise summary, suggest a file title, replace speaker tags, save the final output as a structured Markdown file (`<Title>.md`) with `**Original File:** <filename>`, `# Title`, `## Summary`, and `## Transcript`, and clean up intermediate `.txt` transcripts.
 7. Unloads the Ollama model from GPU memory to leave the GPU clean.
 
 ### `make run DIR="..."` (Batch Processing)
