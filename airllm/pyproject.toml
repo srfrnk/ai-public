@@ -1,0 +1,11 @@
+[project]
+name = "airllm-test"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "airllm>=4.0.0",
+    "bitsandbytes>=0.50.2",
+    "transformers>=4.57,<5",
+]
