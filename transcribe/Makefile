@@ -12,9 +12,9 @@
 #   FILE       = path to a single audio/video file
 #   DIR        = path to directory containing media files (alternative to FILE)
 #   MODEL      = large-v3 (default, best multilingual quality; requires >= 8GB VRAM)
-#   LANGUAGE   = he (default, or 'auto', 'en', etc.)
+#   LANGUAGE   = auto (default, or 'he', 'en', 'es', etc.)
 #   DEVICE     = auto (cuda GPU default, cpu fallback)
-#   LLM_MODEL  = qwen3:30b (default local LLM model for speaker mapping)
+#   LLM_MODEL  = qwen3.8:27b-q4_K_M (default local LLM model for speaker mapping & reconciliation)
 #   EXTRA      = any extra flags (e.g. --duration 60, --print-transcript)
 #
 # Examples:
@@ -33,8 +33,8 @@ DIR          :=
 MODEL        := large-v3
 ASR_ENGINE   := faster-whisper
 DEVICE       := auto
-LANGUAGE     := he
-LLM_MODEL    := qwen3:30b
+LANGUAGE     := auto
+LLM_MODEL    := qwen3.8:27b-q4_K_M
 EXTRA        :=
 
 TARGET_PATH  := $(if $(DIR),$(DIR),$(FILE))
@@ -81,10 +81,29 @@ setup:
 	uv venv --python 3.12 $(VENV_DIR)
 	@echo ""
 	@echo "════════════════════════════════════════════════════════"
-	@echo " Step 4/4: Installing PyTorch CUDA, Transformers, faster-whisper"
+	@echo " Step 4/5: Installing PyTorch CUDA, Transformers, faster-whisper"
 	@echo "════════════════════════════════════════════════════════"
 	uv pip install --python $(PYTHON) torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu124
 	uv pip install --python $(PYTHON) "transformers>=5.18.0" faster-whisper openai-whisper soundfile librosa huggingface_hub "av==18.1.0"
+	@echo ""
+	@echo "════════════════════════════════════════════════════════"
+	@echo " Step 5/5: Checking / setting up Nemotron-3.5 runtime & models"
+	@echo "════════════════════════════════════════════════════════"
+	@mkdir -p nemotron35/bin nemotron35/models
+	@if [ ! -f nemotron35/bin/nemo-speech-0.3.0-linux-x86_64-cuda/bin/nemo-speech ]; then \
+	  echo "Downloading NeMo-Speech.cpp runtime v0.3.0..."; \
+	  curl -sLO https://github.com/NVIDIA/NeMo-Speech.cpp/releases/download/v0.3.0/nemo-speech-0.3.0-linux-x86_64-cuda.tar.gz; \
+	  tar xzf nemo-speech-0.3.0-linux-x86_64-cuda.tar.gz -C nemotron35/bin; \
+	  rm nemo-speech-0.3.0-linux-x86_64-cuda.tar.gz; \
+	fi
+	@if [ ! -f nemotron35/models/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-Encoder-F16.gguf ]; then \
+	  echo "Downloading Nemotron-3.5 Encoder..."; \
+	  curl -sL -C - -o nemotron35/models/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-Encoder-F16.gguf https://huggingface.co/AtomicChat/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-GGUF/resolve/main/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-Encoder-F16.gguf; \
+	fi
+	@if [ ! -f nemotron35/models/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-AD-Q2_0_L.gguf ]; then \
+	  echo "Downloading Nemotron-3.5 Q2_0_L Decoder (15.5GB)..."; \
+	  curl -sL -C - -o nemotron35/models/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-AD-Q2_0_L.gguf https://huggingface.co/AtomicChat/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-GGUF/resolve/main/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-AD-Q2_0_L.gguf; \
+	fi
 	@echo ""
 	@echo "✅ Setup complete. Run: make run FILE=\"my_video.mp4\" or make run DIR=\"my_folder\""
 

@@ -27,7 +27,7 @@ from typing import Dict, Any, Optional, List
 
 
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
-DEFAULT_MODEL = "qwen3:30b"
+DEFAULT_MODEL = "qwen3.8:27b-q4_K_M"
 
 
 def unload_ollama_models(model: Optional[str] = None, host: str = DEFAULT_OLLAMA_URL) -> None:
