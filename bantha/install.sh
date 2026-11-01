@@ -41,6 +41,7 @@ cp "$PROJECT_DIR/completions/bantha.bash" "$HOME/.local/share/bash-completion/co
 # Zsh
 cp "$PROJECT_DIR/completions/bantha.zsh" "$HOME/.local/share/zsh/site-functions/_bantha"
 cp "$PROJECT_DIR/completions/bantha.zsh" "$HOME/.zsh/completions/_bantha"
+cp "$PROJECT_DIR/completions/bantha.zsh" "$HOME/.zsh/completion/_bantha" 2>/dev/null || true
 
 # Fish
 cp "$PROJECT_DIR/completions/bantha.fish" "$HOME/.config/fish/completions/bantha.fish"

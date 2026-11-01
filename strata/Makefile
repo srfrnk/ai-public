@@ -12,6 +12,9 @@ patch-vram:
 run:
 	docker run --rm --gpus all \
 		-p 8080:8080 \
+		--cap-drop ALL \
+		--security-opt no-new-privileges:true \
+		--pids-limit 1024 \
 		--ulimit memlock=-1 \
 		-v strata-data:/data \
 		-e FAMILY=coder \
