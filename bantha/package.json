@@ -1,0 +1,32 @@
+{
+  "name": "bantha",
+  "version": "1.0.0",
+  "description": "Bantha: Heavy carrier runner for AI agents (tuskens: pi, goose, crush, hermes) in a hermetic container sandbox with kernel-level VFS masking and netfilter firewall controls",
+  "main": "dist/cli.js",
+  "bin": {
+    "bantha": "bin/bantha",
+    "agents": "bin/bantha"
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "sandbox",
+    "agents",
+    "hermetic",
+    "docker",
+    "isolation"
+  ],
+  "author": "",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/yaml": "^1.9.7",
+    "typescript": "^5.6.3"
+  },
+  "dependencies": {
+    "yaml": "^2.6.0"
+  }
+}
