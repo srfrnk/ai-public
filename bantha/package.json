@@ -9,6 +9,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "test": "npm run build && node tests/unit/mounts.test.js && node tests/unit/broker.test.js && python3 -m unittest discover -s docker/gateway -p 'test_*.py'",
     "watch": "tsc -w",
     "prepublishOnly": "npm run build"
   },

@@ -1,3 +1,4 @@
+import { SecretsConfig } from '../secrets/broker';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -24,6 +25,28 @@ export interface MountRuleObject {
   mode?: 'ro' | 'rw';
 }
 
+export interface SharedHubSubdirsConfig {
+  rules?: 'ro' | 'rw';
+  mcp?: 'ro' | 'rw';
+  skills?: 'ro' | 'rw';
+}
+
+export interface SharedHubConfig {
+  enabled?: boolean;
+  mode?: 'ro' | 'rw';
+  subdirs?: SharedHubSubdirsConfig;
+}
+
+export interface SharedAgentStateConfig {
+  enabled?: boolean;
+  mode?: 'ro' | 'rw';
+}
+
+export interface FilesystemSharedConfig {
+  hub?: SharedHubConfig;
+  agent_state?: SharedAgentStateConfig;
+}
+
 export interface FilesystemConfig {
   version: string;
   mounts: {
@@ -32,6 +55,7 @@ export interface FilesystemConfig {
       container_path?: string;
       mode?: 'ro' | 'rw';
     };
+    shared?: FilesystemSharedConfig;
   };
 }
 
@@ -43,10 +67,36 @@ export interface NetworkEgressRule {
   domains?: string[];
 }
 
+export interface ServiceRule {
+  endpoint: string;
+  methods?: string[];
+  json_validators?: {
+    path: string;
+    allowed_schemes?: string[];
+    action?: 'reject' | 'strip';
+    error_message?: string;
+  }[];
+  redact_keys?: string[];
+  replacement?: Record<string, any>;
+}
+
+export interface ServiceDefinition {
+  name: string;
+  listen_port: number;
+  upstream: string;
+  preset?: 'strata' | 'ollama' | 'generic-openai' | 'raw-proxy' | string;
+  allowed_endpoints?: string[];
+  blocked_endpoints?: string[];
+  block_action?: 'drop' | 'reject';
+  request_rules?: ServiceRule[];
+  response_rules?: ServiceRule[];
+}
+
 export interface NetworkConfig {
   version: string;
   mode: 'hermetic' | 'none' | 'host';
   default_policy: 'DROP' | 'ACCEPT';
+  services?: ServiceDefinition[];
   dns: {
     enabled: boolean;
     upstream_servers: string[];
@@ -70,12 +120,15 @@ export interface EnvironmentConfig {
   rules: string[];
 }
 
+export type { SecretsConfig };
+
 export interface LoadedSandboxConfig {
   configDir: string;
   container: ContainerConfig;
   filesystem: FilesystemConfig;
   network: NetworkConfig;
   environment: EnvironmentConfig;
+  secrets: SecretsConfig;
   filesystemMatcher: PatternMatcher;
   dnsMatcher: PatternMatcher;
   envMatcher: PatternMatcher;
@@ -106,6 +159,8 @@ export class ConfigLoader {
     const network = this.loadYaml<NetworkConfig>(path.join(this.configDir, 'network.yaml'), this.getDefaultNetworkConfig());
     const environment = this.loadYaml<EnvironmentConfig>(path.join(this.configDir, 'environment.yaml'), this.getDefaultEnvironmentConfig());
 
+    const secrets = this.loadYaml<SecretsConfig>(path.join(this.configDir, 'secrets.yaml'), this.getDefaultSecretsConfig());
+
     // Initialize pattern matchers
     const fsRuleStrings: string[] = [];
     for (const rule of filesystem.mounts.rules || []) {
@@ -117,14 +172,11 @@ export class ConfigLoader {
     }
     const filesystemMatcher = new PatternMatcher(fsRuleStrings);
 
-    // Hardcode deny rules for ~/.bantha, legacy ~/.agent-sandbox and expanded ancestors
+    // Hardcode deny rules for ~/.bantha, and expanded ancestors
     const home = os.homedir();
     const sandboxDir = path.resolve(home, '.bantha');
-    const legacyDir = path.resolve(home, '.agent-sandbox');
     filesystemMatcher.addExplicitDeny(`!${sandboxDir}/**`);
     filesystemMatcher.addExplicitDeny(`!${sandboxDir}`);
-    filesystemMatcher.addExplicitDeny(`!${legacyDir}/**`);
-    filesystemMatcher.addExplicitDeny(`!${legacyDir}`);
     filesystemMatcher.addExplicitDeny(`!${home}/.config/bantha/**`);
     filesystemMatcher.addExplicitDeny(`!${home}/.config/bantha`);
 
@@ -137,6 +189,7 @@ export class ConfigLoader {
       filesystem,
       network,
       environment,
+      secrets,
       filesystemMatcher,
       dnsMatcher,
       envMatcher,
@@ -195,10 +248,60 @@ export class ConfigLoader {
       fs.writeFileSync(nPath, this.getYamlNetworkDefault());
     }
 
+    const sPath = path.join(targetDir, 'secrets.yaml');
+    if (!fs.existsSync(sPath)) {
+      fs.writeFileSync(sPath, this.getYamlSecretsDefault());
+    }
+
     const ePath = path.join(targetDir, 'environment.yaml');
     if (!fs.existsSync(ePath)) {
       fs.writeFileSync(ePath, this.getYamlEnvironmentDefault());
     }
+  }
+
+  public getDefaultSecretsConfig(): SecretsConfig {
+    return {
+      version: '1.0',
+      secrets: [
+        {
+          name: 'anthropic',
+          env: 'ANTHROPIC_API_KEY',
+          upstream: 'https://api.anthropic.com',
+          inject: { header: 'x-api-key' },
+          container_env: { ANTHROPIC_API_KEY: '{token}', ANTHROPIC_BASE_URL: '{proxy}' }
+        },
+        {
+          name: 'openai',
+          env: 'OPENAI_API_KEY',
+          upstream: 'https://api.openai.com',
+          inject: { header: 'Authorization', prefix: 'Bearer ' },
+          container_env: { OPENAI_API_KEY: '{token}', OPENAI_BASE_URL: '{proxy}/v1' }
+        }
+      ]
+    };
+  }
+
+  private getYamlSecretsDefault(): string {
+    return `# secrets.yaml - Host-side secret brokering
+# Real keys stay on the host. The container receives a random per-session token and a
+# base URL pointing at a host proxy that injects the real key for the matching upstream.
+version: "1.0"
+secrets:
+  - name: anthropic
+    env: ANTHROPIC_API_KEY          # host env var (or use: file: /path/to/key)
+    upstream: https://api.anthropic.com
+    inject: { header: x-api-key }
+    container_env:
+      ANTHROPIC_API_KEY: "{token}"
+      ANTHROPIC_BASE_URL: "{proxy}"
+  - name: openai
+    env: OPENAI_API_KEY
+    upstream: https://api.openai.com
+    inject: { header: Authorization, prefix: "Bearer " }
+    container_env:
+      OPENAI_API_KEY: "{token}"
+      OPENAI_BASE_URL: "{proxy}/v1"
+`;
   }
 
   public getDefaultContainerConfig(): ContainerConfig {
@@ -229,6 +332,21 @@ export class ConfigLoader {
         home: {
           container_path: '/home/sandbox',
           mode: 'rw'
+        },
+        shared: {
+          hub: {
+            enabled: true,
+            mode: 'rw',
+            subdirs: {
+              rules: 'rw',
+              mcp: 'rw',
+              skills: 'rw'
+            }
+          },
+          agent_state: {
+            enabled: true,
+            mode: 'rw'
+          }
         }
       }
     };
@@ -239,6 +357,24 @@ export class ConfigLoader {
       version: '1.0',
       mode: 'hermetic',
       default_policy: 'DROP',
+      services: [
+        {
+          name: 'strata',
+          listen_port: 8080,
+          upstream: 'http://172.17.0.1:8080',
+          allowed_endpoints: [
+            '/v1/*',
+            '/health'
+          ],
+          blocked_endpoints: [
+            '/web/*',
+            '/metrics',
+            '/config',
+            '/mcp'
+          ],
+          block_action: 'drop'
+        }
+      ],
       dns: {
         enabled: true,
         upstream_servers: ['1.1.1.1', '8.8.8.8'],
@@ -301,7 +437,7 @@ export class ConfigLoader {
   private getYamlContainerDefault(): string {
     return `# container.yaml - Container Runtime Configuration
 version: "1.0"
-image: "agent-sandbox:latest"
+image: "bantha:latest"
 runtime:
   memory_limit: "16g"    # Default: 16 GB RAM
   cpu_limit: 8.0          # Default: 8 CPU cores
@@ -317,7 +453,7 @@ runtime:
   private getYamlFilesystemDefault(): string {
     return `# filesystem.yaml - Filesystem Access Rules (Gitignore-style syntax)
 # Leading '!' denotes a blacklist / deny rule with strict precedence.
-# ~/.agent-sandbox and all ancestors (~, /home) are hardcoded blacklisted.
+# ~/.bantha and all ancestors (~, /home) are hardcoded blacklisted.
 version: "1.0"
 
 mounts:
@@ -329,6 +465,18 @@ mounts:
   home:
     container_path: "/home/sandbox"
     mode: "rw"
+  # Shared data access control: configure visibility and permissions (rw, ro, or disabled)
+  shared:
+    hub:
+      enabled: true
+      mode: "rw"
+      subdirs:
+        rules: "rw"
+        mcp: "rw"
+        skills: "rw"
+    agent_state:
+      enabled: true
+      mode: "rw"
 `;
   }
 
@@ -337,6 +485,21 @@ mounts:
 version: "1.0"
 mode: "hermetic"
 default_policy: "DROP"
+
+# Services proxy definition and endpoint access controls
+services:
+  - name: "strata"
+    listen_port: 8080
+    upstream: "http://172.17.0.1:8080"
+    allowed_endpoints:
+      - "/v1/*"
+      - "/health"
+    blocked_endpoints:
+      - "/web/*"
+      - "/metrics"
+      - "/config"
+      - "/mcp"
+    block_action: "drop" # 'drop' (silent drop/hangup) or 'reject' (403 error response)
 
 dns:
   enabled: true

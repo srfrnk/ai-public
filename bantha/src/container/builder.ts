@@ -7,7 +7,7 @@ export class ContainerBuilder {
   private dockerContextDir: string;
   private imageName: string;
 
-  constructor(dockerContextDir: string, imageName: string = 'agent-sandbox:latest') {
+  constructor(dockerContextDir: string, imageName: string = 'bantha:latest') {
     this.dockerContextDir = dockerContextDir;
     this.imageName = imageName;
   }
@@ -63,5 +63,30 @@ export class ContainerBuilder {
     }
 
     console.log(`[BUILD] Successfully built "${this.imageName}".`);
+  }
+
+  public ensureGatewayImage(force: boolean = false): void {
+    const gatewayImage = 'bantha-gateway:latest';
+    const check = spawnSync('docker', ['images', '-q', gatewayImage], { encoding: 'utf-8' });
+    if (check.stdout && check.stdout.trim() && !force) {
+      return;
+    }
+
+    const gatewayDir = path.join(this.dockerContextDir, 'gateway');
+    if (!fs.existsSync(gatewayDir)) {
+      return;
+    }
+
+    console.log(`[BUILD] Building Gateway Docker image "${gatewayImage}" from ${gatewayDir}...`);
+    const res = spawnSync('docker', ['build', '-t', gatewayImage, '.'], {
+      cwd: gatewayDir,
+      stdio: 'inherit'
+    });
+
+    if (res.status !== 0) {
+      throw new Error(`[BUILD ERROR] Failed to build gateway image ${gatewayImage}. Exit code: ${res.status}`);
+    }
+
+    console.log(`[BUILD] Successfully built "${gatewayImage}".`);
   }
 }

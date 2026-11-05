@@ -6,7 +6,7 @@ The `environment.yaml` file controls which host environment variables and API ke
 
 ## 1. File Location
 ```
-~/.agent-sandbox/environment.yaml
+~/.bantha/environment.yaml
 ```
 
 ---

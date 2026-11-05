@@ -6,7 +6,7 @@ The `filesystem.yaml` file defines which host files and directories may be acces
 
 ## 1. File Location
 ```
-~/.agent-sandbox/filesystem.yaml
+~/.bantha/filesystem.yaml
 ```
 
 ---
@@ -43,6 +43,19 @@ mounts:
   home:
     container_path: "/home/sandbox"
     mode: "rw"
+
+  # Shared persistence hub and agent state configuration
+  shared:
+    hub:
+      enabled: true
+      mode: "rw"
+      subdirs:
+        rules: "rw"   # set to "ro" to prevent agent from modifying AGENTS.md
+        mcp: "rw"     # set to "ro" to prevent agent from modifying servers.json
+        skills: "rw"  # set to "ro" or "rw"
+    agent_state:
+      enabled: true
+      mode: "rw"
 ```
 
 ---
@@ -52,7 +65,7 @@ mounts:
 ### 3.1 Kernel VFS Mount Masking (`tmpfs`)
 When a whitelisted directory (e.g. `/workspace`) contains a blacklisted subfolder or file (e.g. `/workspace/private`):
 1. Docker bind-mounts `/workspace` into the container namespace.
-2. The `agents` runner automatically mounts an empty, read-only `tmpfs` directly on top of the blacklisted path:
+2. The `bantha` runner automatically mounts an empty, read-only `tmpfs` directly on top of the blacklisted path:
    ```bash
    --mount type=tmpfs,destination=/workspace/private,readonly
    ```
@@ -60,7 +73,7 @@ When a whitelisted directory (e.g. `/workspace`) contains a blacklisted subfolde
 
 ### 3.2 Hardcoded Ancestor Protections
 To prevent configuration or host identity leaks:
-- The configuration directory `~/.agent-sandbox`
+- The configuration directory `~/.bantha`
 - All parent/ancestor directories of `$HOME` (`/home/user`, `/home`, `/`)
-- The source repository where `agents` is installed
+- The source repository where `bantha` is installed
 are **hardcoded as protected**. Any attempt to add them as a mount rule in `filesystem.yaml` triggers an immediate validation failure and halts container startup.

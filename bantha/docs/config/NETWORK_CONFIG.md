@@ -6,7 +6,7 @@ The `network.yaml` file defines the network isolation mode, the default firewall
 
 ## 1. File Location
 ```
-~/.agent-sandbox/network.yaml
+~/.bantha/network.yaml
 ```
 
 ---
@@ -24,6 +24,21 @@ mode: "hermetic"
 
 # Default firewall policy for all outbound and inbound packets
 default_policy: "DROP"
+
+# Services reverse proxy with endpoint access controls and connection dropping
+services:
+  - name: "strata"
+    listen_port: 8080
+    upstream: "http://172.17.0.1:8080"
+    allowed_endpoints:
+      - "/v1/*"
+      - "/health"
+    blocked_endpoints:
+      - "/web/*"
+      - "/metrics"
+      - "/config"
+      - "/mcp"
+    block_action: "drop" # 'drop' (silent socket hangup) or 'reject' (403 error)
 
 # DNS filtering configuration
 dns:

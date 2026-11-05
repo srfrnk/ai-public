@@ -6,7 +6,7 @@ The `container.yaml` file controls the Docker container runtime parameters, reso
 
 ## 1. File Location
 ```
-~/.agent-sandbox/container.yaml
+~/.bantha/container.yaml
 ```
 
 ---
@@ -15,7 +15,7 @@ The `container.yaml` file controls the Docker container runtime parameters, reso
 
 ```yaml
 version: "1.0"
-image: "agent-sandbox:latest"
+image: "bantha:latest"
 
 runtime:
   # Maximum memory allocated to the agent container (e.g., '16g', '8g', '512m')
@@ -48,7 +48,7 @@ runtime:
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `version` | string | `"1.0"` | Configuration schema version. |
-| `image` | string | `"agent-sandbox:latest"` | Name of the Docker image to execute. |
+| `image` | string | `"bantha:latest"` | Name of the Docker image to execute. |
 | `runtime.memory_limit` | string | `"16g"` | Hard memory ceiling enforced by Linux cgroups. |
 | `runtime.cpu_limit` | float | `8.0` | Maximum CPU core quota enforced by Linux cgroups. |
 | `runtime.run_as_user` | boolean | `true` | Maps host user `UID:GID` so file edits inside the container retain proper ownership on the host. |

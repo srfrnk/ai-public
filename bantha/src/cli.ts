@@ -7,6 +7,27 @@ import { ContainerBuilder } from './container/builder';
 import { ContainerRunner } from './container/runner';
 import { CompletionGenerator } from './completion/generator';
 
+import * as readline from 'readline';
+import { activeSecretRules } from './secrets/broker';
+
+function askApproval(skipPrompt: boolean): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (skipPrompt || !process.stdin.isTTY || !process.stdout.isTTY) {
+      resolve(true);
+      return;
+    }
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout
+    });
+    rl.question('\x1b[33mPress [Enter] to approve and start the agent (or Ctrl+C to abort)...\x1b[0m', () => {
+      rl.close();
+      console.log();
+      resolve(true);
+    });
+  });
+}
+
 function checkStrataHealth(): Promise<{ running: boolean; model?: string; error?: string }> {
   return new Promise((resolve) => {
     const req = http.get('http://127.0.0.1:8080/health', { timeout: 1500 }, (res) => {
@@ -75,6 +96,13 @@ async function main() {
     process.exit(0);
   }
 
+  // Handle inspect / dry-run
+  if (command === 'inspect') {
+    const currentWorkdir = process.cwd();
+    printExposureSummary(currentWorkdir, config);
+    process.exit(0);
+  }
+
   // Handle tuskens list
   if (command === 'tuskens') {
     printTuskens();
@@ -114,6 +142,13 @@ async function main() {
   const agentArgs = args.slice(1);
   const currentWorkdir = process.cwd();
 
+  // Print exposure summary banner before launching
+  printExposureSummary(currentWorkdir, config);
+
+  // Require user approval before starting agent container
+  // Everything after tusken name belongs to the agent
+  await askApproval(false);
+
   try {
     const exitCode = await runner.run(command, agentArgs, currentWorkdir);
     process.exit(exitCode);
@@ -133,6 +168,7 @@ isolated, hermetic environment.
 
 USAGE:
   bantha <tusken> [args...]       Launch a tusken (hermes, goose, pi, crush) inside the sandbox
+  bantha inspect                 Display the exact resource exposure summary for the current directory
   bantha tuskens                 List available tuskens and their status
   bantha build [--force]         Build or force-rebuild the sandbox Docker image
   bantha status                  Display active configurations and isolation policies
@@ -171,6 +207,148 @@ AVAILABLE TUSKENS (AGENTS):
 Usage: bantha <tusken> [options/prompts...]
 Example: bantha hermes chat -q "Hello"
 `);
+}
+
+function printExposureSummary(workdir: string, config: any) {
+  const allowedEnv: string[] = [];
+  let blockedEnvCount = 0;
+  const brokered = activeSecretRules(config.secrets);
+  const withheld = new Set<string>(brokered.map(r => r.env).filter((e): e is string => !!e));
+  for (const k of Object.keys(process.env)) {
+    if (k === 'HOME' || k === 'PATH' || k.startsWith('AGENT_')) continue;
+    if (withheld.has(k)) {
+      blockedEnvCount++;
+    } else if (config.envMatcher.test(k).allowed) {
+      allowedEnv.push(k);
+    } else {
+      blockedEnvCount++;
+    }
+  }
+
+  // Extract explicit network egress allowances
+  const egressList: string[] = [];
+  for (const r of config.network.egress?.rules || []) {
+    if (typeof r === 'object') {
+      const proto = (r.proto || 'tcp').toUpperCase();
+      if (r.ips && (r.ports || r.port)) {
+        const ports = r.ports ? r.ports.join(', ') : r.port;
+        egressList.push(`${r.ips.join(', ')} (Port ${ports} ${proto})`);
+      } else if (r.domains && (r.ports || r.port)) {
+        const ports = r.ports ? r.ports.join(', ') : r.port;
+        egressList.push(`${r.domains.join(', ')} (Port ${ports} ${proto})`);
+      }
+    }
+  }
+
+  // Extract explicit network ingress allowances
+  const ingressList: string[] = [];
+  for (const r of config.network.ingress?.rules || []) {
+    if (typeof r === 'object') {
+      const proto = (r.proto || 'tcp').toUpperCase();
+      if (r.ips && (r.ports || r.port)) {
+        const ports = r.ports ? r.ports.join(', ') : r.port;
+        ingressList.push(`From ${r.ips.join(', ')} -> Port ${ports} ${proto}`);
+      } else if (r.ports || r.port) {
+        const ports = r.ports ? r.ports.join(', ') : r.port;
+        ingressList.push(`Port ${ports} ${proto}`);
+      }
+    }
+  }
+
+  const dnsRules = (config.network.dns?.rules || [])
+    .filter((r: string) => !r.startsWith('!'));
+
+  console.log(`\x1b[36mSecurity & Resource Agent Exposure Report:\x1b[0m`);
+  
+  // Filesystems
+  console.log(`  ├─ Filesystem Mappings:`);
+  console.log(`  │   ├─ Workspace:     ${workdir} -> /workspace (rw)`);
+  console.log(`  │   └─ Shared Hub:    ~/.bantha/data/shared -> ~/.shared (rw)`);
+
+  // Proxied Gateway Services
+  const services = config.network.services || [];
+  console.log(`  ├─ Proxied Gateway Services (${services.length}):`);
+  if (services.length > 0) {
+    services.forEach((s: any, idx: number) => {
+      const isLast = idx === services.length - 1;
+      const branch = isLast ? '└─' : '├─';
+      const pipe = isLast ? ' ' : '│';
+      console.log(`  │   ${branch} ${s.name} (Port ${s.listen_port} -> ${s.upstream}):`);
+      const allowed = s.allowed_endpoints && s.allowed_endpoints.length > 0 ? s.allowed_endpoints.join(', ') : 'all';
+      const blocked = s.blocked_endpoints && s.blocked_endpoints.length > 0 ? s.blocked_endpoints.join(', ') : 'none';
+      const action = s.block_action || 'drop';
+      console.log(`  │   ${pipe}   ├─ Allowed: ${allowed}`);
+      console.log(`  │   ${pipe}   ├─ Blocked: ${blocked}`);
+      console.log(`  │   ${pipe}   └─ Action:  ${action}`);
+    });
+  } else {
+    console.log(`  │   └─ none`);
+  }
+
+  // Brokered secrets (real keys stay on the host)
+  console.log(`  ├─ Brokered Secrets (${brokered.length}, real keys never enter the container):`);
+  if (brokered.length > 0) {
+    brokered.forEach((r, idx) => {
+      const branch = idx === brokered.length - 1 ? '└─' : '├─';
+      console.log(`  │   ${branch} ${r.name}: ${Object.keys(r.container_env || {}).join(', ') || '(no container env)'} -> ${r.upstream}`);
+    });
+  } else {
+    console.log(`  │   └─ none`);
+  }
+
+  // Allowed Host Env
+  console.log(`  ├─ Allowed Host Env (${allowedEnv.length} allowed, ${blockedEnvCount} blocked):`);
+  if (allowedEnv.length > 0) {
+    // Print in rows of up to 4 variables
+    const chunkSize = 4;
+    for (let i = 0; i < allowedEnv.length; i += chunkSize) {
+      const chunk = allowedEnv.slice(i, i + chunkSize);
+      const isLast = i + chunkSize >= allowedEnv.length;
+      const branch = isLast ? '└─' : '├─';
+      console.log(`  │   ${branch} ${chunk.join(', ')}`);
+    }
+  } else {
+    console.log(`  │   └─ none`);
+  }
+
+  // Network Egress
+  console.log(`  ├─ Allowed Network Egress:`);
+  if (egressList.length > 0) {
+    egressList.forEach((e: string, idx: number) => {
+      const isLast = idx === egressList.length - 1;
+      const branch = isLast ? '└─' : '├─';
+      console.log(`  │   ${branch} ${e}`);
+    });
+  } else {
+    console.log(`  │   └─ none (Drop all outbound traffic)`);
+  }
+
+  // Network Ingress
+  console.log(`  ├─ Allowed Network Ingress:`);
+  if (ingressList.length > 0) {
+    ingressList.forEach((ing: string, idx: number) => {
+      const isLast = idx === ingressList.length - 1;
+      const branch = isLast ? '└─' : '├─';
+      console.log(`  │   ${branch} ${ing}`);
+    });
+  } else {
+    console.log(`  │   └─ none (Drop all inbound traffic)`);
+  }
+
+  // Whitelisted DNS
+  console.log(`  └─ Whitelisted DNS (Mode: ${config.network.mode}):`);
+  if (dnsRules.length > 0) {
+    const chunkSize = 3;
+    for (let i = 0; i < dnsRules.length; i += chunkSize) {
+      const chunk = dnsRules.slice(i, i + chunkSize);
+      const isLast = i + chunkSize >= dnsRules.length;
+      const branch = isLast ? '└─' : '├─';
+      console.log(`      ${branch} ${chunk.join(', ')}`);
+    }
+  } else {
+    console.log(`      └─ none (All DNS queries blocked)`);
+  }
+  console.log();
 }
 
 function printStatus(config: any, strataInfo?: { running: boolean; model?: string; error?: string }) {

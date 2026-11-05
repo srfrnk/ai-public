@@ -3,7 +3,7 @@ const { MountPlanner } = require('../../dist/container/mounts');
 const os = require('os');
 const path = require('path');
 
-const loader = new ConfigLoader(path.join(os.homedir(), '.agent-sandbox'));
+const loader = new ConfigLoader(path.join(os.homedir(), '.bantha'));
 const config = loader.loadAll();
 const planner = new MountPlanner(config);
 
@@ -22,5 +22,36 @@ console.assert(!plan2.mounts.some(m => m.source === home), 'Test 2 Failed: Home 
 config.filesystemMatcher.addExplicitDeny('!/tmp');
 const plan3 = planner.planMounts(cwd);
 console.assert(!plan3.mounts.some(m => m.source === cwd), 'Test 3 Failed: Blacklisted dir mounted');
+
+// 4. Shared Hub & Subdirs Permission test
+const customConfig = Object.assign({}, config, {
+  filesystem: Object.assign({}, config.filesystem, {
+    mounts: Object.assign({}, config.filesystem.mounts, {
+      shared: {
+        hub: {
+          enabled: true,
+          mode: 'rw',
+          subdirs: {
+            rules: 'ro',
+            mcp: 'rw',
+            skills: 'rw'
+          }
+        },
+        agent_state: {
+          enabled: true,
+          mode: 'rw'
+        }
+      }
+    })
+  })
+});
+const customPlanner = new MountPlanner(customConfig);
+const plan4 = customPlanner.planMounts('/tmp', 'hermes');
+
+const sharedRootMount = plan4.mounts.find(m => m.destination === '/home/sandbox/.shared');
+console.assert(sharedRootMount && sharedRootMount.type === 'volume' && sharedRootMount.volumeName === 'bantha-shared', 'Test 4 Failed: shared root not mounted as volume');
+
+const hermesStateMount = plan4.mounts.find(m => m.destination === '/home/sandbox/.agent-state/hermes');
+console.assert(hermesStateMount && hermesStateMount.type === 'volume' && hermesStateMount.volumeName === 'bantha-agent-hermes', 'Test 4 Failed: hermes agent state not mounted as volume');
 
 console.log('ALL MOUNT PLANNER TESTS PASSED!');

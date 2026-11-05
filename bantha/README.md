@@ -2,7 +2,21 @@
 
 > **The resilient beast of burden navigating the harsh digital sands, carrying nomadic AI agents (Tuskens) in a secure, hermetic container sandbox.**
 
-Bantha is a hermetic container sandbox runner for autonomous AI coding agents (**Tuskens**: `hermes`, `goose`, `pi`, `crush`) featuring Linux kernel VFS mount namespace masking, Netfilter packet filtering, and zero host intrusion.
+Bantha is designed for **running autonomous AI coding agents locally in a secure, controlled environment—whether powered by cloud APIs or local inference engines—especially when models cannot be fully trusted**.
+
+Autonomous agents need broad agency: executing shell commands, reading/writing files, installing dependencies, and interacting with network APIs. Running them directly on your bare-metal machine exposes your personal files, credentials, SSH keys, and local network to arbitrary tool execution, model hallucinations, or prompt injection. 
+
+Bantha provides an **easy-to-configure, lightweight boundary** that lets locally running agents work productively with your workspace filesystem, persistent skills, and network while **minimizing risk to your host machine**.
+
+---
+
+## Why Bantha?
+
+- **Untrusted Model Safety**: Safely run cutting-edge, experimental, or open-weights models (via Ollama, Strata, vLLM, or cloud providers) without worrying that an errant shell command or prompt injection will touch your personal files or host environment.
+- **Easy, Declarative Local Configuration**: Configure what the agent can see through simple Gitignore-style rules for filesystems, environment variables, network endpoints, and brokered secrets.
+- **Real Filesystem & Git Workflow**: Work directly in your project folder with correct host `UID:GID` file ownership. Agents update code, create skills, and configure tools that you can immediately inspect, test, and commit to Git.
+- **Out-of-Band Secrets Brokering**: Cloud API keys (OpenAI, Anthropic) stay on the host. The agent only receives virtualized per-session proxy tokens, preventing credential scraping or exfiltration.
+- **Pre-Flight Due Diligence**: Every run presents an upfront Security & Resource Exposure Report showing the exact workspace mounts, proxied services, brokered secrets, and network rules before prompting for your approval.
 
 ---
 
@@ -25,6 +39,10 @@ Bantha is a hermetic container sandbox runner for autonomous AI coding agents (*
   - Universal shared hub for cross-agent skills, MCP server registries, and rules (`AGENTS.md`).
 - **Embedded Agent Runtime**: `pi`, `goose`, `crush`, and `hermes` live exclusively inside the container image; no host installation required.
 - **Shell Auto-Completion**: Full completion support for `bash`, `zsh`, and `fish` for both `bantha` and `agents`.
+
+## Isolation Model & Trade-offs
+
+Bantha runs agents in a hardened **Docker container**, which shares the host kernel. The agent runs as an unprivileged user with all capabilities dropped, `no-new-privileges`, a firewall it cannot modify, and kernel-level path masking. This is a smaller trust boundary than a hypervisor: a container-escape vulnerability in the host kernel would bypass it. Tools that run each agent in a microVM (for example Docker Sandboxes) trade a heavier setup for a stronger boundary and give the agent root inside it. If you run untrusted code and need that stronger boundary, consider a microVM-based sandbox, or a stronger container runtime such as gVisor or Kata (not yet supported by Bantha).
 
 ## Quick Start
 
@@ -59,4 +77,20 @@ bantha status
   - [Filesystem Configuration (`filesystem.yaml`)](docs/config/FILESYSTEM_CONFIG.md)
   - [Network Configuration (`network.yaml`)](docs/config/NETWORK_CONFIG.md)
   - [Environment Configuration (`environment.yaml`)](docs/config/ENVIRONMENT_CONFIG.md)
+  - [Secret Brokering (`secrets.yaml`)](docs/config/SECRETS_CONFIG.md)
   - [Unified Pattern Syntax (`PATTERN_SYNTAX.md`)](docs/config/PATTERN_SYNTAX.md)
+
+## TODO
+
+- [ ] Wire in the gateway (`docker/gateway/`, `network.yaml: services`): nothing starts it today, and it is hidden from the reports. Harden it first: stream responses, cap request body size, fail closed on validation errors, and avoid listening on `0.0.0.0`.
+- [ ] Support a stronger container runtime such as gVisor or Kata via `--runtime`.
+- [ ] Add session convenience commands: list, stop, remove, and open a shell in a running session.
+- [ ] Add a small agent/kit definition format so agents and policies can be shared. Consider reading sbx v2 kit specs directly to reuse the existing catalog.
+- [ ] Add more secret-broker routes (OpenRouter, HuggingFace) and OAuth support if needed.
+- [ ] Make image builds reproducible (replace `bin-cache` and the vendored hermes tree with pinned downloads) and add CI.
+- [ ] Add an optional `sbx` backend (`backend: docker | sbx` in `container.yaml`):
+  - Split `runner.ts` into a shared policy step and two launchers.
+  - Translate `filesystem.yaml` into mounts, `network.yaml` domains into `sbx policy` rules, and `secrets.yaml` into `sbx secret set`.
+  - Write a `goose` kit (`hermes-agent`, `pi` and `crush` kits already exist).
+  - Warn about settings `sbx` cannot enforce (path masks, IP/port rules, NTP block).
+  - Note the requirements: Docker sign-in, KVM or equivalent, and default CLI telemetry.

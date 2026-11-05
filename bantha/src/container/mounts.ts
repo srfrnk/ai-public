@@ -4,8 +4,10 @@ import * as os from 'os';
 import { LoadedSandboxConfig, MountRuleObject } from '../config/loader';
 
 export interface PlannedMount {
-  type: 'bind' | 'tmpfs';
+  type: 'bind' | 'tmpfs' | 'volume';
   source?: string;
+  volumeName?: string;
+  hostSyncDir?: string;
   destination: string;
   mode: 'ro' | 'rw';
 }
@@ -30,26 +32,43 @@ export class MountPlanner {
     const home = os.homedir();
     const sandboxDataDir = path.join(this.config.configDir, 'data');
 
-    // 1. Persistent Shared Hub: skills, mcp, rules (RW across all agents)
-    const sharedHostDir = path.join(sandboxDataDir, 'shared');
-    fs.mkdirSync(path.join(sharedHostDir, 'skills'), { recursive: true });
-    fs.mkdirSync(path.join(sharedHostDir, 'mcp'), { recursive: true });
-    fs.mkdirSync(path.join(sharedHostDir, 'rules'), { recursive: true });
+    const sharedConfig = this.config.filesystem.mounts.shared;
+    const hubConfig = sharedConfig?.hub;
+    const isHubEnabled = hubConfig?.enabled ?? true;
 
-    whitelistedBinds.push({
-      host: sharedHostDir,
-      container: '/home/sandbox/.shared',
-      mode: 'rw'
-    });
+    // 1. Persistent Shared Hub: skills, mcp, rules (isolated named volume with host bidirectional sync)
+    if (isHubEnabled) {
+      const sharedHostDir = path.join(sandboxDataDir, 'shared');
+      const sharedRulesDir = path.join(sharedHostDir, 'rules');
+      const sharedMcpDir = path.join(sharedHostDir, 'mcp');
+      const sharedSkillsDir = path.join(sharedHostDir, 'skills');
 
-    // 2. Per-Agent Persistent Storage (Sessions, state, memory)
-    if (agentName) {
+      fs.mkdirSync(sharedSkillsDir, { recursive: true });
+      fs.mkdirSync(sharedMcpDir, { recursive: true });
+      fs.mkdirSync(sharedRulesDir, { recursive: true });
+
+      const hubMode = hubConfig?.mode || 'rw';
+      planned.push({
+        type: 'volume',
+        volumeName: 'bantha-shared',
+        hostSyncDir: sharedHostDir,
+        destination: '/home/sandbox/.shared',
+        mode: hubMode
+      });
+    }
+
+    // 2. Per-Agent Persistent Storage (Sessions, state, memory - isolated named volume with host sync)
+    const agentStateConfig = sharedConfig?.agent_state;
+    const isAgentStateEnabled = agentStateConfig?.enabled ?? true;
+    if (agentName && isAgentStateEnabled) {
       const agentHostDir = path.join(sandboxDataDir, 'agents', agentName);
       fs.mkdirSync(agentHostDir, { recursive: true });
-      whitelistedBinds.push({
-        host: agentHostDir,
-        container: `/home/sandbox/.agent-state/${agentName}`,
-        mode: 'rw'
+      planned.push({
+        type: 'volume',
+        volumeName: `bantha-agent-${agentName}`,
+        hostSyncDir: agentHostDir,
+        destination: `/home/sandbox/.agent-state/${agentName}`,
+        mode: agentStateConfig?.mode || 'rw'
       });
     }
 

@@ -1,8 +1,9 @@
-import { LoadedSandboxConfig, NetworkEgressRule } from '../config/loader';
+import { LoadedSandboxConfig, NetworkEgressRule, ServiceDefinition } from '../config/loader';
 
 export interface CompiledNetworkPlan {
   mode: 'hermetic' | 'none' | 'host';
   defaultPolicy: string;
+  services?: ServiceDefinition[];
   dns: {
     enabled: boolean;
     upstreamServers: string[];
@@ -76,6 +77,7 @@ export class NetworkRulesCompiler {
     return {
       mode: net.mode || 'hermetic',
       defaultPolicy: net.default_policy || 'DROP',
+      services: net.services || [],
       dns: {
         enabled: net.dns?.enabled ?? true,
         upstreamServers: net.dns?.upstream_servers || ['1.1.1.1', '8.8.8.8'],

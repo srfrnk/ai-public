@@ -1,5 +1,5 @@
 # ==============================================================================
-# Dockerfile for Hermetic Agent Sandbox (agent-sandbox:latest)
+# Dockerfile for Hermetic Agent Sandbox (bantha:latest)
 # Builds all 4 agents (pi, goose, crush, hermes) into an isolated Ubuntu container
 # ==============================================================================
 

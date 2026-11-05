@@ -21,6 +21,13 @@ When installed via `./install.sh`, `~/.bantha` is automatically prepended to you
 bantha <tusken|subcommand> [flags...] [-- tusken-options...]
 ```
 
+### Pre-Flight Due Diligence & Approval
+When launching an agent (e.g. `bantha hermes`), Bantha prints a **Security & Resource Agent Exposure Report** displaying the exact workspace mount, proxied gateway services, brokered secrets, passed host environment variables, and outbound network rules. In interactive sessions, Bantha prompts for your approval before launching the container:
+```text
+Press [Enter] to approve and start the agent (or Ctrl+C to abort)...
+```
+This guarantees complete visibility into what is exposed to the agent before execution begins and ensures Hermes or other full-screen TUIs do not clear the banner before you have had a chance to review it. Use `-y` or `--yes` to bypass the prompt in automated scripts.
+
 ---
 
 ## 3. Supported Tuskens (Agents)
@@ -35,6 +42,14 @@ bantha <tusken|subcommand> [flags...] [-- tusken-options...]
 ---
 
 ## 4. Subcommands
+
+### `bantha inspect`
+Displays the exact resource exposure summary for the current working directory without launching a container:
+- Mounted workspace paths and shared persistent volumes
+- Proxied gateway services and endpoint filtering policies
+- Brokered secrets (keys that stay on the host) and the container variables that point at the proxy
+- Whitelisted environment variables passed into the sandbox vs. blocked host variables
+- Outbound network egress and DNS filtering rules
 
 ### `bantha tuskens`
 Lists all available Tuskens (agents), their version, and their persistence status.
@@ -66,7 +81,7 @@ Outputs shell auto-completion code for the specified shell.
 
 For instructions on configuring local engines (Strata, Ollama, vLLM) or cloud API providers (Anthropic Claude, OpenAI, OpenRouter, DeepSeek), see **[Inference Providers Guide](PROVIDERS.md)**.
 
-### `agents help`
+### `bantha help`
 Prints the help and usage overview.
 
 ---

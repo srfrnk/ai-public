@@ -57,7 +57,7 @@ If a runner simply checks paths at startup and allows mounting a parent director
 ### How Mount Masking Guarantees Isolation
 Linux kernel mount namespaces (`CLONE_NEWNS`) allow mounting filesystems over existing paths:
 1. Docker mounts the parent directory into the container.
-2. The `agents` runner inspects the configured blacklist patterns and applies a dedicated mount:
+2. The `bantha` runner inspects the configured blacklist patterns and applies a dedicated mount:
    ```bash
    --mount type=tmpfs,destination=/workspace/private,readonly
    ```
