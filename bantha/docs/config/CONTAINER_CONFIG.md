@@ -17,6 +17,16 @@ The `container.yaml` file controls the Docker container runtime parameters, reso
 version: "1.0"
 image: "bantha:latest"
 
+# Optional inference configuration - generic defaults if omitted.
+# You can customize the provider alias or model name presented to the agent.
+# If omitted or left as "default", the agent cannot deduce real backend or weights.
+inference:
+  provider_name: "default"     # Provider alias presented to agent (default: "default")
+  model_name: "default"        # Model name presented to agent (default: "default")
+  # base_url: "http://172.17.0.1:8080/v1" # Optional custom endpoint
+  context_window: 131072
+  max_tokens: 4096
+
 runtime:
   # Maximum memory allocated to the agent container (e.g., '16g', '8g', '512m')
   memory_limit: "16g"

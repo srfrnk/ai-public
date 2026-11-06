@@ -27,15 +27,22 @@ export class ContainerBuilder {
   }
 
   /**
-   * Computes a checksum of Dockerfile and entrypoint script
+   * Computes a checksum of Dockerfile and all context scripts/templates
    */
   public computeContextHash(): string {
     const hash = crypto.createHash('sha256');
-    const files = ['Dockerfile', 'entrypoint.sh', 'dns-gate.py'];
+    const files = [
+      'Dockerfile',
+      'entrypoint.sh',
+      'dns-gate.py',
+      'setup-strata.py',
+      'sync-agent-storage.py'
+    ];
 
     for (const f of files) {
       const p = path.join(this.dockerContextDir, f);
       if (fs.existsSync(p)) {
+        hash.update(f);
         hash.update(fs.readFileSync(p));
       }
     }
@@ -44,7 +51,24 @@ export class ContainerBuilder {
   }
 
   /**
-   * Builds the Docker image if missing or requested
+   * Retrieves the context hash label from the local image if it exists
+   */
+  public getImageContextHash(): string | null {
+    try {
+      const res = spawnSync('docker', ['image', 'inspect', this.imageName, '--format', '{{index .Config.Labels "bantha.context_hash"}}'], {
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore']
+      });
+      if (res.status === 0 && res.stdout) {
+        const val = res.stdout.trim();
+        return val && val !== '<no value>' ? val : null;
+      }
+    } catch {}
+    return null;
+  }
+
+  /**
+   * Builds the Docker image if missing or explicitly forced
    */
   public ensureImage(force: boolean = false): void {
     const exists = this.imageExists();
@@ -52,8 +76,10 @@ export class ContainerBuilder {
       return;
     }
 
+    const currentHash = this.computeContextHash();
     console.log(`[BUILD] Building Docker image "${this.imageName}" from ${this.dockerContextDir}...`);
-    const res = spawnSync('docker', ['build', '-t', this.imageName, '.'], {
+
+    const res = spawnSync('docker', ['build', '--label', `bantha.context_hash=${currentHash}`, '-t', this.imageName, '.'], {
       cwd: this.dockerContextDir,
       stdio: 'inherit'
     });

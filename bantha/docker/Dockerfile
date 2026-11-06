@@ -50,11 +50,14 @@ RUN echo '#!/bin/sh\nexport HERMES_HOME=/home/sandbox/.hermes\nexec /opt/hermes/
 
 RUN chmod +x /usr/local/bin/* 2>/dev/null || true
 
-# 6. Setup entrypoint and DNS filter gate
+# 6. Setup entrypoint, helper scripts, and DNS filter gate
 RUN mkdir -p /opt/sandbox /home/sandbox
 COPY entrypoint.sh /opt/sandbox/entrypoint.sh
 COPY dns-gate.py /opt/sandbox/dns-gate.py
-RUN chmod +x /opt/sandbox/entrypoint.sh /opt/sandbox/dns-gate.py
+COPY maskmounts.c /opt/sandbox/maskmounts.c
+RUN gcc -O2 -shared -fPIC -o /opt/sandbox/libmaskmounts.so /opt/sandbox/maskmounts.c -ldl && \
+    rm -f /opt/sandbox/maskmounts.c && \
+    chmod +x /opt/sandbox/entrypoint.sh /opt/sandbox/dns-gate.py /opt/sandbox/libmaskmounts.so
 
 ENV HOME=/home/sandbox
 WORKDIR /home/sandbox

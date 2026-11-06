@@ -138,7 +138,7 @@ async function main() {
   }
 
   // Run the agent inside the sandbox
-  const runner = new ContainerRunner(config);
+  const runner = new ContainerRunner(config, dockerContextDir);
   const agentArgs = args.slice(1);
   const currentWorkdir = process.cwd();
 
@@ -284,6 +284,18 @@ function printExposureSummary(workdir: string, config: any) {
   } else {
     console.log(`  │   └─ none`);
   }
+
+  // Configured Inference Exposure (Presented to Agent vs Protected)
+  const inf = config.container.inference || {};
+  const infProvider = inf.provider_name || 'default';
+  const infModel = inf.model_name || 'default';
+  const infEndpoint = inf.base_url || 'http://172.17.0.1:8080/v1 (local default)';
+  const infCtx = inf.context_window || 131072;
+  console.log(`  ├─ Inference Service Exposure (Anonymized to Agent):`);
+  console.log(`  │   ├─ Exposed Provider: ${infProvider}`);
+  console.log(`  │   ├─ Exposed Model:    ${infModel}`);
+  console.log(`  │   ├─ Target Endpoint:  ${infEndpoint}`);
+  console.log(`  │   └─ Context Window:   ${infCtx}`);
 
   // Brokered secrets (real keys stay on the host)
   console.log(`  ├─ Brokered Secrets (${brokered.length}, real keys never enter the container):`);

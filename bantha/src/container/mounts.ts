@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import * as crypto from 'crypto';
 import { LoadedSandboxConfig, MountRuleObject } from '../config/loader';
 
 export interface PlannedMount {
@@ -25,7 +26,11 @@ export class MountPlanner {
    * 2. Checks each against protected ancestors (throws error if forbidden).
    * 3. Discovers blacklisted subtrees/files inside those mounts and adds read-only tmpfs masks.
    */
-  public planMounts(currentHostWorkdir: string, agentName?: string): { mounts: PlannedMount[]; containerWorkdir: string } {
+  public planMounts(
+    currentHostWorkdir: string,
+    agentName?: string,
+    sessionId?: string
+  ): { mounts: PlannedMount[]; containerWorkdir: string } {
     const planned: PlannedMount[] = [];
     const whitelistedBinds: { host: string; container: string; mode: 'ro' | 'rw' }[] = [];
 
@@ -35,6 +40,7 @@ export class MountPlanner {
     const sharedConfig = this.config.filesystem.mounts.shared;
     const hubConfig = sharedConfig?.hub;
     const isHubEnabled = hubConfig?.enabled ?? true;
+    const sessionSuffix = sessionId ? `-${sessionId}` : '';
 
     // 1. Persistent Shared Hub: skills, mcp, rules (isolated named volume with host bidirectional sync)
     if (isHubEnabled) {
@@ -50,7 +56,7 @@ export class MountPlanner {
       const hubMode = hubConfig?.mode || 'rw';
       planned.push({
         type: 'volume',
-        volumeName: 'bantha-shared',
+        volumeName: `bantha-shared${sessionSuffix}`,
         hostSyncDir: sharedHostDir,
         destination: '/home/sandbox/.shared',
         mode: hubMode
@@ -65,7 +71,7 @@ export class MountPlanner {
       fs.mkdirSync(agentHostDir, { recursive: true });
       planned.push({
         type: 'volume',
-        volumeName: `bantha-agent-${agentName}`,
+        volumeName: `bantha-agent-${agentName}${sessionSuffix}`,
         hostSyncDir: agentHostDir,
         destination: `/home/sandbox/.agent-state/${agentName}`,
         mode: agentStateConfig?.mode || 'rw'

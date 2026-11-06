@@ -2,3 +2,5 @@ node_modules/
 dist/
 docker/bin-cache/
 *.log
+tests/ctf/result.txt
+tests/ctf/result*.txt

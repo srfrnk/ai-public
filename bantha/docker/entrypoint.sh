@@ -40,22 +40,31 @@ if [ -n "$NET_PLAN" ]; then
             iptables -A OUTPUT -p udp --dport 123 -j DROP
         fi
 
-        # 4. Start DNS filter gate & configure redirection
+        # 4. Explicitly block outbound DNS-over-HTTPS (DoH) / DNS-over-TLS (DoT) circumvention
+        # Known public DoH/DoT resolver IPs (Cloudflare, Google, Quad9, OpenDNS)
+        DOH_IPS="1.1.1.1 1.0.0.1 8.8.8.8 8.8.4.4 9.9.9.9 149.112.112.112 208.67.222.222 208.67.220.220"
+        for doh_ip in $DOH_IPS; do
+            iptables -A OUTPUT -p tcp -d "$doh_ip" --dport 443 -j DROP
+            iptables -A OUTPUT -p tcp -d "$doh_ip" --dport 853 -j DROP
+            iptables -A OUTPUT -p udp -d "$doh_ip" --dport 853 -j DROP
+        done
+
+        # 5. Start DNS filter gate & configure redirection
         DNS_ENABLED=$(python3 -c "import json, sys; d=json.loads(sys.argv[1]); print(d.get('dns', {}).get('enabled', True))" "$NET_PLAN")
         if [ "$DNS_ENABLED" = "True" ]; then
             python3 /opt/sandbox/dns-gate.py "$NET_PLAN" >/dev/null 2>&1 &
             DNS_PID=$!
 
-            # Redirect local outbound UDP 53 to 127.0.0.1:5300 (DNS gate)
+            # Redirect unprivileged outbound UDP 53 to 127.0.0.1:5300 (DNS gate)
             iptables -t nat -A OUTPUT -p udp --dport 53 -j REDIRECT --to-ports 5300
 
-            # Allow DNS gate process to make outbound UDP 53 to configured upstream DNS servers
+            # Allow root DNS gate process exclusively to make outbound UDP 53 to configured upstreams
             UPSTREAMS=$(python3 -c "import json, sys; d=json.loads(sys.argv[1]); print(' '.join(d.get('dns', {}).get('upstreamServers', [])))" "$NET_PLAN")
             for up in $UPSTREAMS; do
-                iptables -A OUTPUT -p udp -d "$up" --dport 53 -j ACCEPT
+                iptables -A OUTPUT -p udp -d "$up" --dport 53 -m owner --uid-owner 0 -j ACCEPT
             done
 
-            # Drop any direct plain UDP DNS queries not redirected
+            # Drop any direct plain UDP/TCP DNS queries from non-root or unredirected sockets
             BLOCK_OTHER_DNS=$(python3 -c "import json, sys; d=json.loads(sys.argv[1]); print(d.get('dns', {}).get('blockPlainUdpDns', True))" "$NET_PLAN")
             if [ "$BLOCK_OTHER_DNS" = "True" ]; then
                 iptables -A OUTPUT -p udp --dport 53 -j DROP
@@ -63,29 +72,41 @@ if [ -n "$NET_PLAN" ]; then
             fi
         fi
 
-        # 5. Apply whitelisted Egress rules (TCP/UDP to IPs and ports)
-        # Parses allowed IPs and ports from json
+        # 6. Apply whitelisted Egress rules (TCP/UDP to IPs and ports)
+        # Never default to 0.0.0.0/0 when domains are specified; resolve domains or require explicit IPs
         python3 -c "
-import json, sys, subprocess
+import json, sys, subprocess, socket
 
 plan = json.loads(sys.argv[1])
 egress = plan.get('egressRules', [])
 
 for rule in egress:
     proto = rule.get('proto', 'tcp')
-    ips = rule.get('ips', [])
+    ips = set(rule.get('ips', []))
     ports = rule.get('ports', [])
+    domains = rule.get('domains', [])
+
+    # If domain names are configured, resolve them dynamically to host IPs
+    for d in domains:
+        clean_d = d.lstrip('*').lstrip('.')
+        try:
+            resolved = socket.gethostbyname_ex(clean_d)[2]
+            for r_ip in resolved:
+                ips.add(r_ip)
+        except Exception:
+            pass
     
     if ips and ports:
         for ip in ips:
             for port in ports:
                 subprocess.run(['iptables', '-A', 'OUTPUT', '-p', proto, '-d', str(ip), '--dport', str(port), '-j', 'ACCEPT'], check=False)
-    elif ports:
-        for port in ports:
-            subprocess.run(['iptables', '-A', 'OUTPUT', '-p', proto, '--dport', str(port), '-j', 'ACCEPT'], check=False)
     elif ips:
         for ip in ips:
             subprocess.run(['iptables', '-A', 'OUTPUT', '-p', proto, '-d', str(ip), '-j', 'ACCEPT'], check=False)
+    elif ports and not domains:
+        # Only permit general port egress if no domain restrictions were configured
+        for port in ports:
+            subprocess.run(['iptables', '-A', 'OUTPUT', '-p', proto, '--dport', str(port), '-j', 'ACCEPT'], check=False)
 " "$NET_PLAN"
 
         # 6. Apply Ingress rules
@@ -166,21 +187,57 @@ if [ -f /etc/sandbox-awareness/AVAILABLE_RESOURCES.md ]; then
     cp /etc/sandbox-awareness/AVAILABLE_RESOURCES.md /home/sandbox/AVAILABLE_RESOURCES.md
 fi
 
-# Configure Strata inference integration if gateway IP is present
-if [ -f /opt/sandbox/setup-strata.py ]; then
-    python3 /opt/sandbox/setup-strata.py \
-        "${STRATA_GATEWAY_IP:-172.17.0.1}" \
-        "${STRATA_PORT:-8080}" \
-        "${STRATA_MODEL:-qwen3.8-flash-next-coder-iq1_m}" \
-        "${STRATA_CONTEXT_WINDOW:-131072}" \
-        "${STRATA_MAX_TOKENS:-4096}" \
-        "${STRATA_API_KEY:-none}" || true
-fi
-
 # Sync and link persistent agent state & shared skills/mcp/rules
 if [ -f /opt/sandbox/sync-agent-storage.py ]; then
     python3 /opt/sandbox/sync-agent-storage.py || true
 fi
+
+# Configure inference integration (generic defaults, or user-customized via INFERENCE_* env vars)
+# Run AFTER linking storage so it updates the active agent's config.yaml / settings.json
+if [ -f /opt/sandbox/setup-strata.py ]; then
+    python3 /opt/sandbox/setup-strata.py || true
+fi
+
+# Generate generic sanitized mount tables and install mount table masking
+if [ -f /opt/sandbox/libmaskmounts.so ]; then
+    mkdir -p /opt/sandbox
+    # Mask host overlay, mapper, and bind mounts generically without mentioning host-specific names
+    if [ -f /proc/self/mountinfo ]; then
+        sed -E -e 's#[^[:space:]]+/((entrypoint\.sh|setup-strata\.py|libmaskmounts\.so|sync-agent-storage\.py))#/opt/sandbox/\1#g' \
+               -e 's#/mnt/[^[:space:],]+#/var/lib/docker/overlayfs#g' \
+               -e 's#/dev/mapper/[^[:space:],]+#/dev/sda1#g' \
+               -e 's#/dev/root#/dev/sda1#g' \
+               -e 's#/docker/containers/[0-9a-f]+#/etc#g' \
+               /proc/self/mountinfo > /opt/sandbox/.sanitized_mountinfo 2>/dev/null || true
+        chmod 644 /opt/sandbox/.sanitized_mountinfo 2>/dev/null || true
+    fi
+    if [ -f /proc/self/mounts ]; then
+        sed -E -e 's#[^[:space:]]+/((entrypoint\.sh|setup-strata\.py|libmaskmounts\.so|sync-agent-storage\.py))#/opt/sandbox/\1#g' \
+               -e 's#/mnt/[^[:space:],]+#/var/lib/docker/overlayfs#g' \
+               -e 's#/dev/mapper/[^[:space:],]+#/dev/sda1#g' \
+               -e 's#/dev/root#/dev/sda1#g' \
+               -e 's#/docker/containers/[0-9a-f]+#/etc#g' \
+               /proc/self/mounts > /opt/sandbox/.sanitized_mounts 2>/dev/null || true
+        chmod 644 /opt/sandbox/.sanitized_mounts 2>/dev/null || true
+    fi
+    if [ -f /proc/cmdline ]; then
+        sed -E -e 's#root=[^[:space:]]+#root=/dev/sda1#g' \
+               -e 's#/dev/mapper/[^[:space:],]+#/dev/sda1#g' \
+               /proc/cmdline > /opt/sandbox/.sanitized_cmdline 2>/dev/null || true
+        chmod 644 /opt/sandbox/.sanitized_cmdline 2>/dev/null || true
+    fi
+    if [ -f /proc/partitions ]; then
+        sed -E -e 's#dm-[0-9]+#sda1#g' \
+               /proc/partitions > /opt/sandbox/.sanitized_partitions 2>/dev/null || true
+        chmod 644 /opt/sandbox/.sanitized_partitions 2>/dev/null || true
+    fi
+    echo '/opt/sandbox/libmaskmounts.so' > /etc/ld.so.preload
+    chmod 644 /etc/ld.so.preload
+fi
+
+# Clean up all inference setup variables so the running agent process cannot inspect them
+unset INFERENCE_PROVIDER INFERENCE_MODEL INFERENCE_BASE_URL INFERENCE_CONTEXT_WINDOW INFERENCE_MAX_TOKENS INFERENCE_API_KEY
+unset STRATA_GATEWAY_IP STRATA_PORT STRATA_MODEL STRATA_CONTEXT_WINDOW STRATA_MAX_TOKENS STRATA_API_KEY
 
 chown -R "$HOST_UID:$HOST_GID" /home/sandbox 2>/dev/null || true
 

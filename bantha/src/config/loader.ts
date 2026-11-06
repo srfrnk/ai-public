@@ -6,9 +6,20 @@ import { parse } from 'yaml';
 import { PatternMatcher } from './pattern-matcher';
 import { PathValidator } from './validator';
 
+export interface InferenceConfig {
+  provider_name?: string;     // Generic provider alias presented to agent (default: "default")
+  model_name?: string;        // Model name presented to agent (default: "default")
+  upstream_model?: string;    // Actual upstream model name passed to backend (optional)
+  base_url?: string;          // Inference URL (default: http://172.17.0.1:8080/v1)
+  context_window?: number;    // Context length (default: 131072)
+  max_tokens?: number;        // Max output tokens (default: 4096)
+  api_key?: string;           // Optional API key (default: "none")
+}
+
 export interface ContainerConfig {
   version: string;
   image: string;
+  inference?: InferenceConfig;
   runtime: {
     memory_limit: string;
     cpu_limit: number;
@@ -308,6 +319,12 @@ secrets:
     return {
       version: '1.0',
       image: 'bantha:latest',
+      inference: {
+        provider_name: 'default',
+        model_name: 'default',
+        context_window: 131072,
+        max_tokens: 4096
+      },
       runtime: {
         memory_limit: '16g',
         cpu_limit: 8.0,
@@ -399,7 +416,7 @@ secrets:
           {
             proto: 'tcp',
             ips: ['127.0.0.1', '172.17.0.1'],
-            ports: [8080, 11434]
+            ports: [8080]
           },
           {
             proto: 'tcp',
@@ -424,9 +441,6 @@ secrets:
         'COLORTERM',
         'LANG',
         'LC_ALL',
-        'ANTHROPIC_*',
-        'OPENAI_*',
-        'HF_TOKEN',
         '!AWS_*',
         '!*_SECRET*',
         '!ANTIGRAVITY_*'
@@ -438,6 +452,18 @@ secrets:
     return `# container.yaml - Container Runtime Configuration
 version: "1.0"
 image: "bantha:latest"
+
+# Optional inference engine configuration (fully generic & agnostic)
+# Users can customize model and provider names presented to the agent.
+# If omitted or left as "default", the agent cannot deduce real backend or weights.
+inference:
+  provider_name: "default"     # Provider alias presented to agent (e.g. "default", "local")
+  model_name: "default"        # Model name presented to agent (e.g. "default", "claude-3-5-sonnet")
+  # upstream_model: "qwen3.8-flash-next-coder-iq1_m" # Optional: real backend model if translating
+  # base_url: "http://172.17.0.1:8080/v1"            # Optional: custom inference base URL
+  context_window: 131072
+  max_tokens: 4096
+
 runtime:
   memory_limit: "16g"    # Default: 16 GB RAM
   cpu_limit: 8.0          # Default: 8 CPU cores
@@ -526,7 +552,7 @@ egress:
   rules:
     - proto: "tcp"
       ips: ["127.0.0.1", "172.17.0.1"]
-      ports: [8080, 11434]
+      ports: [8080]
     - proto: "tcp"
       port: 443
       domains:
@@ -550,9 +576,6 @@ rules:
   - "COLORTERM"
   - "LANG"
   - "LC_ALL"
-  - "ANTHROPIC_*"
-  - "OPENAI_*"
-  - "HF_TOKEN"
   - "!AWS_*"
   - "!*_SECRET*"
   - "!ANTIGRAVITY_*"

@@ -2,20 +2,24 @@ import { spawn, SpawnOptions, execSync } from 'child_process';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import { LoadedSandboxConfig } from '../config/loader';
 import { MountPlanner, PlannedMount } from './mounts';
 import { startBroker, ActiveBroker } from '../secrets/broker';
+import { startServiceGateway, ActiveGateway } from '../gateway/service-gateway';
 import { NetworkRulesCompiler, CompiledNetworkPlan } from '../network/rules-compiler';
 
 export class ContainerRunner {
   private config: LoadedSandboxConfig;
   private mountPlanner: MountPlanner;
   private netCompiler: NetworkRulesCompiler;
+  private dockerDir?: string;
 
-  constructor(config: LoadedSandboxConfig) {
+  constructor(config: LoadedSandboxConfig, dockerDir?: string) {
     this.config = config;
     this.mountPlanner = new MountPlanner(config);
     this.netCompiler = new NetworkRulesCompiler(config);
+    this.dockerDir = dockerDir;
   }
 
   private getDockerGatewayIp(): string {
@@ -36,10 +40,12 @@ export class ContainerRunner {
       fs.mkdirSync(hostDir, { recursive: true });
     }
     try {
-      execSync(`docker volume inspect ${volumeName}`, { stdio: 'ignore' });
-    } catch {
+      // Re-create a clean, empty volume so it is strictly true-to-source with hostDir
+      execSync(`docker volume rm -f ${volumeName}`, { stdio: 'ignore' });
+    } catch {}
+    try {
       execSync(`docker volume create ${volumeName}`, { stdio: 'ignore' });
-    }
+    } catch {}
     try {
       // Pipe tar from host directory into container volume mount
       execSync(`tar -C "${hostDir}" -cf - . | docker run --rm -i -v "${volumeName}:/dest" ${this.config.container.image || 'bantha:latest'} tar -C /dest -xf -`, {
@@ -61,29 +67,53 @@ export class ContainerRunner {
     } catch (err: any) {
       // Non-fatal
     }
+    try {
+      // Remove temporary session volume when finished
+      execSync(`docker volume rm -f ${volumeName}`, { stdio: 'ignore' });
+    } catch {}
   }
 
   public async run(agent: string, agentArgs: string[], currentHostWorkdir: string): Promise<number> {
     const gatewayIp = this.getDockerGatewayIp();
     let broker: ActiveBroker | undefined;
+    let serviceGateway: ActiveGateway | undefined;
+
     try {
       broker = await startBroker(this.config.secrets, gatewayIp);
     } catch (err: any) {
       throw new Error(`Failed to start secret broker on ${gatewayIp}: ${err?.message || err}`);
     }
+
     try {
-      return await this.runContainer(agent, agentArgs, currentHostWorkdir, gatewayIp, broker);
+      serviceGateway = await startServiceGateway(this.config.network.services, gatewayIp, this.dockerDir);
+    } catch (err: any) {
+      console.warn(`[WARN] Failed to start service gateway proxy: ${err?.message || err}`);
+    }
+
+    try {
+      return await this.runContainer(agent, agentArgs, currentHostWorkdir, gatewayIp, broker, serviceGateway);
     } finally {
       await broker?.stop();
+      await serviceGateway?.stop();
     }
   }
 
-  private runContainer(agent: string, agentArgs: string[], currentHostWorkdir: string, gatewayIp: string, broker?: ActiveBroker): Promise<number> {
+  private runContainer(
+    agent: string,
+    agentArgs: string[],
+    currentHostWorkdir: string,
+    gatewayIp: string,
+    broker?: ActiveBroker,
+    serviceGateway?: ActiveGateway
+  ): Promise<number> {
     return new Promise((resolve, reject) => {
-      // 1. Plan Mounts & Workdir
-      const { mounts, containerWorkdir } = this.mountPlanner.planMounts(currentHostWorkdir, agent);
+      // 1. Generate unique session ID for this container execution
+      const sessionId = crypto.randomBytes(4).toString('hex');
 
-      // 2. Compile Network rules
+      // 2. Plan Mounts & Workdir with unique session volume names
+      const { mounts, containerWorkdir } = this.mountPlanner.planMounts(currentHostWorkdir, agent, sessionId);
+
+      // 3. Compile Network rules
       const netPlan = this.netCompiler.compile();
 
       // Allow the container to reach the host secret broker
@@ -91,13 +121,31 @@ export class ContainerRunner {
         netPlan.egressRules.push({ proto: 'tcp', ips: [broker.host], ports: [broker.port] });
       }
 
-      // Ensure Gateway IP on port 8080 (Strata) is in egress rules
-      if (!netPlan.egressRules.some(r => r.ips && r.ips.includes(gatewayIp) && r.ports && r.ports.includes(8080))) {
-        netPlan.egressRules.push({
-          proto: 'tcp',
-          ips: [gatewayIp],
-          ports: [8080]
-        });
+      // If service gateway is active, allow egress to the proxy ports and block direct access to original host services
+      if (serviceGateway && serviceGateway.services.length > 0) {
+        for (const s of serviceGateway.services) {
+          // Allow proxy port egress
+          netPlan.egressRules.push({
+            proto: 'tcp',
+            ips: [gatewayIp],
+            ports: [s.proxyPort]
+          });
+          // Remove direct access to original service port if present
+          for (const rule of netPlan.egressRules) {
+            if (rule.ips && rule.ips.includes(gatewayIp) && rule.ports) {
+              rule.ports = rule.ports.filter(p => p !== s.originalPort);
+            }
+          }
+        }
+      } else {
+        // Fallback: Ensure Gateway IP on port 8080 (Strata) is in egress rules
+        if (!netPlan.egressRules.some(r => r.ips && r.ips.includes(gatewayIp) && r.ports && r.ports.includes(8080))) {
+          netPlan.egressRules.push({
+            proto: 'tcp',
+            ips: [gatewayIp],
+            ports: [8080]
+          });
+        }
       }
 
       const netPlanJson = JSON.stringify(netPlan);
@@ -122,9 +170,9 @@ export class ContainerRunner {
 
       // Linux capabilities (NET_ADMIN is required for netfilter rules inside container)
       // Drop everything first, then add back only what the entrypoint needs
-      // (user setup, chown, gosu) plus any configured capabilities.
+      // (user setup, chown, gosu, cross-UID signal forwarding for tini/init) plus any configured capabilities.
       dockerArgs.push('--cap-drop=ALL');
-      const entrypointCaps = ['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'SETUID', 'SETGID'];
+      const entrypointCaps = ['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'SETUID', 'SETGID', 'KILL'];
       const caps = new Set([...entrypointCaps, ...(this.config.container.runtime.cap_add || [])]);
       for (const cap of caps) {
         dockerArgs.push(`--cap-add=${cap}`);
@@ -150,12 +198,31 @@ export class ContainerRunner {
       // Workdir
       dockerArgs.push('-w', containerWorkdir);
 
-      // Pass Strata Gateway & inference details
-      dockerArgs.push('-e', `STRATA_GATEWAY_IP=${gatewayIp}`);
-      dockerArgs.push('-e', 'STRATA_PORT=8080');
-      dockerArgs.push('-e', 'STRATA_MODEL=qwen3.8-flash-next-coder-iq1_m');
-      dockerArgs.push('-e', 'STRATA_CONTEXT_WINDOW=131072');
-      dockerArgs.push('-e', 'STRATA_MAX_TOKENS=4096');
+      // Pass generic, agnostic inference configuration (customizable by user in container.yaml)
+      const infConfig = this.config.container.inference || {};
+      const infProvider = infConfig.provider_name || 'default';
+      const infModel = infConfig.model_name || 'default';
+
+      // If gateway proxied the inference service port, point the agent to the gateway proxy port
+      let defaultInfPort = 8080;
+      if (serviceGateway) {
+        const strataGw = serviceGateway.services.find(s => s.originalPort === 8080 || s.name === 'strata');
+        if (strataGw) {
+          defaultInfPort = strataGw.proxyPort;
+        }
+      }
+
+      const infBaseUrl = infConfig.base_url || `http://${gatewayIp}:${defaultInfPort}/v1`;
+      const infContext = String(infConfig.context_window || 131072);
+      const infMaxTokens = String(infConfig.max_tokens || 4096);
+      const infApiKey = infConfig.api_key || 'none';
+
+      dockerArgs.push('-e', `INFERENCE_PROVIDER=${infProvider}`);
+      dockerArgs.push('-e', `INFERENCE_MODEL=${infModel}`);
+      dockerArgs.push('-e', `INFERENCE_BASE_URL=${infBaseUrl}`);
+      dockerArgs.push('-e', `INFERENCE_CONTEXT_WINDOW=${infContext}`);
+      dockerArgs.push('-e', `INFERENCE_MAX_TOKENS=${infMaxTokens}`);
+      dockerArgs.push('-e', `INFERENCE_API_KEY=${infApiKey}`);
 
       // Pass Network Plan via ENV
       dockerArgs.push('-e', `AGENT_NET_PLAN=${netPlanJson}`);
@@ -192,6 +259,22 @@ export class ContainerRunner {
           dockerArgs.push('-v', `${m.volumeName}:${m.destination}:${m.mode}`);
         } else if (m.type === 'tmpfs') {
           dockerArgs.push('--mount', `type=tmpfs,destination=${m.destination},readonly`);
+        }
+      }
+
+      // Mount updated entrypoint, setup scripts, and hardening libraries directly from source if available
+      if (this.dockerDir) {
+        const epPath = path.join(this.dockerDir, 'entrypoint.sh');
+        const setupPath = path.join(this.dockerDir, 'setup-strata.py');
+        const libMaskPath = path.join(this.dockerDir, 'libmaskmounts.so');
+        if (fs.existsSync(epPath)) {
+          dockerArgs.push('-v', `${epPath}:/opt/sandbox/entrypoint.sh:ro`);
+        }
+        if (fs.existsSync(setupPath)) {
+          dockerArgs.push('-v', `${setupPath}:/opt/sandbox/setup-strata.py:ro`);
+        }
+        if (fs.existsSync(libMaskPath)) {
+          dockerArgs.push('-v', `${libMaskPath}:/opt/sandbox/libmaskmounts.so:ro`);
         }
       }
 
