@@ -35,44 +35,6 @@ export class ContainerRunner {
     return '172.17.0.1';
   }
 
-  private syncHostToVolume(hostDir: string, volumeName: string): void {
-    if (!fs.existsSync(hostDir)) {
-      fs.mkdirSync(hostDir, { recursive: true });
-    }
-    try {
-      // Re-create a clean, empty volume so it is strictly true-to-source with hostDir
-      execSync(`docker volume rm -f ${volumeName}`, { stdio: 'ignore' });
-    } catch {}
-    try {
-      execSync(`docker volume create ${volumeName}`, { stdio: 'ignore' });
-    } catch {}
-    try {
-      // Pipe tar from host directory into container volume mount
-      execSync(`tar -C "${hostDir}" -cf - . | docker run --rm -i -v "${volumeName}:/dest" ${this.config.container.image || 'bantha:latest'} tar -C /dest -xf -`, {
-        stdio: ['pipe', 'ignore', 'ignore']
-      });
-    } catch (err: any) {
-      // Non-fatal if empty directory
-    }
-  }
-
-  private syncVolumeToHost(volumeName: string, hostDir: string): void {
-    if (!fs.existsSync(hostDir)) {
-      fs.mkdirSync(hostDir, { recursive: true });
-    }
-    try {
-      execSync(`docker run --rm -v "${volumeName}:/src" ${this.config.container.image || 'bantha:latest'} tar -C /src -cf - . | tar -C "${hostDir}" -xf -`, {
-        stdio: ['ignore', 'pipe', 'ignore']
-      });
-    } catch (err: any) {
-      // Non-fatal
-    }
-    try {
-      // Remove temporary session volume when finished
-      execSync(`docker volume rm -f ${volumeName}`, { stdio: 'ignore' });
-    } catch {}
-  }
-
   public async run(agent: string, agentArgs: string[], currentHostWorkdir: string): Promise<number> {
     const gatewayIp = this.getDockerGatewayIp();
     let broker: ActiveBroker | undefined;
@@ -110,7 +72,7 @@ export class ContainerRunner {
       // 1. Generate unique session ID for this container execution
       const sessionId = crypto.randomBytes(4).toString('hex');
 
-      // 2. Plan Mounts & Workdir with unique session volume names
+      // 2. Plan Mounts & Workdir
       const { mounts, containerWorkdir } = this.mountPlanner.planMounts(currentHostWorkdir, agent, sessionId);
 
       // 3. Compile Network rules
@@ -138,7 +100,7 @@ export class ContainerRunner {
           }
         }
       } else {
-        // Fallback: Ensure Gateway IP on port 8080 (Strata) is in egress rules
+        // Fallback: Ensure Gateway IP on default port 8080 is in egress rules
         if (!netPlan.egressRules.some(r => r.ips && r.ips.includes(gatewayIp) && r.ports && r.ports.includes(8080))) {
           netPlan.egressRules.push({
             proto: 'tcp',
@@ -206,9 +168,9 @@ export class ContainerRunner {
       // If gateway proxied the inference service port, point the agent to the gateway proxy port
       let defaultInfPort = 8080;
       if (serviceGateway) {
-        const strataGw = serviceGateway.services.find(s => s.originalPort === 8080 || s.name === 'strata');
-        if (strataGw) {
-          defaultInfPort = strataGw.proxyPort;
+        const infGw = serviceGateway.services.find(s => s.originalPort === 8080 || s.name === 'inference' || s.name === 'strata');
+        if (infGw) {
+          defaultInfPort = infGw.proxyPort;
         }
       }
 
@@ -238,13 +200,6 @@ export class ContainerRunner {
         }
       }
 
-      // Sync host persistent hubs into isolated Docker volumes prior to execution
-      for (const m of mounts) {
-        if (m.type === 'volume' && m.volumeName && m.hostSyncDir) {
-          this.syncHostToVolume(m.hostSyncDir, m.volumeName);
-        }
-      }
-
       // Generate and pass Positive-Only Sandbox Awareness Resources Payload
       const awarenessPayload = this.buildAwarenessPayload(mounts, netPlan, allowedEnvNames);
       dockerArgs.push('-e', `AGENT_RESOURCES_PAYLOAD=${Buffer.from(JSON.stringify(awarenessPayload)).toString('base64')}`);
@@ -265,13 +220,13 @@ export class ContainerRunner {
       // Mount updated entrypoint, setup scripts, and hardening libraries directly from source if available
       if (this.dockerDir) {
         const epPath = path.join(this.dockerDir, 'entrypoint.sh');
-        const setupPath = path.join(this.dockerDir, 'setup-strata.py');
+        const setupPath = path.join(this.dockerDir, 'setup-agent.py');
         const libMaskPath = path.join(this.dockerDir, 'libmaskmounts.so');
         if (fs.existsSync(epPath)) {
           dockerArgs.push('-v', `${epPath}:/opt/sandbox/entrypoint.sh:ro`);
         }
         if (fs.existsSync(setupPath)) {
-          dockerArgs.push('-v', `${setupPath}:/opt/sandbox/setup-strata.py:ro`);
+          dockerArgs.push('-v', `${setupPath}:/opt/sandbox/setup-agent.py:ro`);
         }
         if (fs.existsSync(libMaskPath)) {
           dockerArgs.push('-v', `${libMaskPath}:/opt/sandbox/libmaskmounts.so:ro`);
@@ -315,13 +270,6 @@ export class ContainerRunner {
         process.off('SIGINT', forwardSignal);
         process.off('SIGTERM', forwardSignal);
         process.off('SIGHUP', forwardSignal);
-
-        // Sync volume updates back to host directories for git tracking
-        for (const m of mounts) {
-          if (m.type === 'volume' && m.volumeName && m.hostSyncDir && m.mode === 'rw') {
-            this.syncVolumeToHost(m.volumeName, m.hostSyncDir);
-          }
-        }
 
         resolve(code ?? 0);
       });

@@ -40,9 +40,8 @@ export class MountPlanner {
     const sharedConfig = this.config.filesystem.mounts.shared;
     const hubConfig = sharedConfig?.hub;
     const isHubEnabled = hubConfig?.enabled ?? true;
-    const sessionSuffix = sessionId ? `-${sessionId}` : '';
 
-    // 1. Persistent Shared Hub: skills, mcp, rules (isolated named volume with host bidirectional sync)
+    // 1. Persistent Shared Hub: skills, mcp, rules (direct host mount)
     if (isHubEnabled) {
       const sharedHostDir = path.join(sandboxDataDir, 'shared');
       const sharedRulesDir = path.join(sharedHostDir, 'rules');
@@ -55,25 +54,35 @@ export class MountPlanner {
 
       const hubMode = hubConfig?.mode || 'rw';
       planned.push({
-        type: 'volume',
-        volumeName: `bantha-shared${sessionSuffix}`,
-        hostSyncDir: sharedHostDir,
+        type: 'bind',
+        source: sharedHostDir,
         destination: '/home/sandbox/.shared',
         mode: hubMode
       });
     }
 
-    // 2. Per-Agent Persistent Storage (Sessions, state, memory - isolated named volume with host sync)
+    // 2. Per-Agent Persistent Storage (Sessions, state, memory - direct host mount to native path)
     const agentStateConfig = sharedConfig?.agent_state;
     const isAgentStateEnabled = agentStateConfig?.enabled ?? true;
     if (agentName && isAgentStateEnabled) {
       const agentHostDir = path.join(sandboxDataDir, 'agents', agentName);
       fs.mkdirSync(agentHostDir, { recursive: true });
+
+      let targetContainerPath = `/home/sandbox/.agent-state/${agentName}`;
+      if (agentName === 'hermes') {
+        targetContainerPath = '/home/sandbox/.hermes';
+      } else if (agentName === 'pi') {
+        targetContainerPath = '/home/sandbox/.pi';
+      } else if (agentName === 'crush') {
+        targetContainerPath = '/home/sandbox/.config/crush';
+      } else if (agentName === 'goose') {
+        targetContainerPath = '/home/sandbox/.config/goose';
+      }
+
       planned.push({
-        type: 'volume',
-        volumeName: `bantha-agent-${agentName}${sessionSuffix}`,
-        hostSyncDir: agentHostDir,
-        destination: `/home/sandbox/.agent-state/${agentName}`,
+        type: 'bind',
+        source: agentHostDir,
+        destination: targetContainerPath,
         mode: agentStateConfig?.mode || 'rw'
       });
     }

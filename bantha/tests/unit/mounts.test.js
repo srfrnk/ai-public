@@ -49,9 +49,9 @@ const customPlanner = new MountPlanner(customConfig);
 const plan4 = customPlanner.planMounts('/tmp', 'hermes');
 
 const sharedRootMount = plan4.mounts.find(m => m.destination === '/home/sandbox/.shared');
-console.assert(sharedRootMount && sharedRootMount.type === 'volume' && sharedRootMount.volumeName === 'bantha-shared', 'Test 4 Failed: shared root not mounted as volume');
+console.assert(sharedRootMount && sharedRootMount.type === 'bind' && sharedRootMount.source.endsWith('/shared'), 'Test 4 Failed: shared root not mounted as bind');
 
-const hermesStateMount = plan4.mounts.find(m => m.destination === '/home/sandbox/.agent-state/hermes');
-console.assert(hermesStateMount && hermesStateMount.type === 'volume' && hermesStateMount.volumeName === 'bantha-agent-hermes', 'Test 4 Failed: hermes agent state not mounted as volume');
+const hermesStateMount = plan4.mounts.find(m => m.destination === '/home/sandbox/.hermes');
+console.assert(hermesStateMount && hermesStateMount.type === 'bind' && hermesStateMount.source.endsWith('/agents/hermes'), 'Test 4 Failed: hermes agent state not mounted directly to ~/.hermes');
 
 console.log('ALL MOUNT PLANNER TESTS PASSED!');

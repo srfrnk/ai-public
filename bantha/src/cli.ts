@@ -28,27 +28,43 @@ function askApproval(skipPrompt: boolean): Promise<boolean> {
   });
 }
 
-function checkStrataHealth(): Promise<{ running: boolean; model?: string; error?: string }> {
+function checkInferenceHealth(config: any): Promise<{ running: boolean; model?: string; error?: string; endpoint?: string }> {
   return new Promise((resolve) => {
-    const req = http.get('http://127.0.0.1:8080/health', { timeout: 1500 }, (res) => {
+    const infConfig = config.container?.inference || {};
+    const baseUrl = infConfig.base_url || 'http://127.0.0.1:8080/v1';
+    let healthUrl: string;
+    try {
+      const parsed = new URL(baseUrl);
+      // Only health-check local loopback endpoints (remote cloud endpoints like api.anthropic.com don't have /health)
+      if (parsed.hostname !== '127.0.0.1' && parsed.hostname !== 'localhost' && parsed.hostname !== '172.17.0.1') {
+        resolve({ running: true, endpoint: baseUrl });
+        return;
+      }
+      healthUrl = `${parsed.protocol}//${parsed.host}/health`;
+    } catch {
+      resolve({ running: true, endpoint: baseUrl });
+      return;
+    }
+
+    const req = http.get(healthUrl, { timeout: 1500 }, (res) => {
       let data = '';
       res.on('data', (chunk) => (data += chunk));
       res.on('end', () => {
         try {
           const json = JSON.parse(data);
           if (json.status === 'ok') {
-            resolve({ running: true, model: json.model });
+            resolve({ running: true, model: json.model, endpoint: healthUrl });
             return;
           }
         } catch {}
-        resolve({ running: res.statusCode === 200 });
+        resolve({ running: res.statusCode === 200, endpoint: healthUrl });
       });
     });
 
-    req.on('error', (err) => resolve({ running: false, error: err.message }));
+    req.on('error', (err) => resolve({ running: false, error: err.message, endpoint: healthUrl }));
     req.on('timeout', () => {
       req.destroy();
-      resolve({ running: false, error: 'Connection timed out' });
+      resolve({ running: false, error: 'Connection timed out', endpoint: healthUrl });
     });
   });
 }
@@ -91,8 +107,8 @@ async function main() {
 
   // Handle status
   if (command === 'status') {
-    const strataInfo = await checkStrataHealth();
-    printStatus(config, strataInfo);
+    const infInfo = await checkInferenceHealth(config);
+    printStatus(config, infInfo);
     process.exit(0);
   }
 
@@ -130,11 +146,10 @@ async function main() {
   // Ensure image exists automatically
   builder.ensureImage(false);
 
-  // Check Strata inference health before starting agent
-  const strataInfo = await checkStrataHealth();
-  if (!strataInfo.running) {
-    console.warn(`[WARN] Local Strata inference service is NOT reachable on 127.0.0.1:8080.`);
-    console.warn(`       To start it, run: 'strata start'`);
+  // Check inference health before starting agent
+  const infInfo = await checkInferenceHealth(config);
+  if (!infInfo.running) {
+    console.warn(`[WARN] Configured local inference service is NOT reachable at ${infInfo.endpoint || '127.0.0.1:8080'}.`);
   }
 
   // Run the agent inside the sandbox
@@ -363,7 +378,7 @@ function printExposureSummary(workdir: string, config: any) {
   console.log();
 }
 
-function printStatus(config: any, strataInfo?: { running: boolean; model?: string; error?: string }) {
+function printStatus(config: any, infInfo?: { running: boolean; model?: string; error?: string; endpoint?: string }) {
   console.log(`=== BANTHA SANDBOX STATUS ===`);
   console.log(`Config Directory:    ${config.configDir}`);
   console.log(`Container Image:     ${config.container.image}`);
@@ -374,11 +389,11 @@ function printStatus(config: any, strataInfo?: { running: boolean; model?: strin
   console.log(`SNTP Blocked:        ${!config.network.sntp?.enabled}`);
   console.log(`DNS Filtering:       ${config.network.dns?.enabled ? 'ACTIVE' : 'DISABLED'}`);
 
-  if (strataInfo) {
-    if (strataInfo.running) {
-      console.log(`Strata Service:      RUNNING (Model: ${strataInfo.model || 'loaded'}) on 127.0.0.1:8080`);
+  if (infInfo) {
+    if (infInfo.running) {
+      console.log(`Inference Service:   RUNNING (Model: ${infInfo.model || 'loaded'}) at ${infInfo.endpoint || '127.0.0.1:8080'}`);
     } else {
-      console.log(`Strata Service:      NOT REACHABLE (${strataInfo.error || 'stopped'})`);
+      console.log(`Inference Service:   NOT REACHABLE (${infInfo.error || 'stopped'}) at ${infInfo.endpoint || '127.0.0.1:8080'}`);
     }
   }
   console.log(`\nProtected Directories (Never mounted):`);

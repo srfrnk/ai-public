@@ -187,15 +187,10 @@ if [ -f /etc/sandbox-awareness/AVAILABLE_RESOURCES.md ]; then
     cp /etc/sandbox-awareness/AVAILABLE_RESOURCES.md /home/sandbox/AVAILABLE_RESOURCES.md
 fi
 
-# Sync and link persistent agent state & shared skills/mcp/rules
-if [ -f /opt/sandbox/sync-agent-storage.py ]; then
-    python3 /opt/sandbox/sync-agent-storage.py || true
-fi
-
-# Configure inference integration (generic defaults, or user-customized via INFERENCE_* env vars)
-# Run AFTER linking storage so it updates the active agent's config.yaml / settings.json
-if [ -f /opt/sandbox/setup-strata.py ]; then
-    python3 /opt/sandbox/setup-strata.py || true
+# Configure inference integration (generic defaults, or user-customized via INFERENCE_* env vars),
+# and wire shared skills/mcp/rules
+if [ -f /opt/sandbox/setup-agent.py ]; then
+    python3 /opt/sandbox/setup-agent.py || true
 fi
 
 # Generate generic sanitized mount tables and install mount table masking
@@ -203,7 +198,7 @@ if [ -f /opt/sandbox/libmaskmounts.so ]; then
     mkdir -p /opt/sandbox
     # Mask host overlay, mapper, and bind mounts generically without mentioning host-specific names
     if [ -f /proc/self/mountinfo ]; then
-        sed -E -e 's#[^[:space:]]+/((entrypoint\.sh|setup-strata\.py|libmaskmounts\.so|sync-agent-storage\.py))#/opt/sandbox/\1#g' \
+        sed -E -e 's#[^[:space:]]+/((entrypoint\.sh|setup-agent\.py|libmaskmounts\.so))#/opt/sandbox/\1#g' \
                -e 's#/mnt/[^[:space:],]+#/var/lib/docker/overlayfs#g' \
                -e 's#/dev/mapper/[^[:space:],]+#/dev/sda1#g' \
                -e 's#/dev/root#/dev/sda1#g' \
@@ -212,7 +207,7 @@ if [ -f /opt/sandbox/libmaskmounts.so ]; then
         chmod 644 /opt/sandbox/.sanitized_mountinfo 2>/dev/null || true
     fi
     if [ -f /proc/self/mounts ]; then
-        sed -E -e 's#[^[:space:]]+/((entrypoint\.sh|setup-strata\.py|libmaskmounts\.so|sync-agent-storage\.py))#/opt/sandbox/\1#g' \
+        sed -E -e 's#[^[:space:]]+/((entrypoint\.sh|setup-agent\.py|libmaskmounts\.so))#/opt/sandbox/\1#g' \
                -e 's#/mnt/[^[:space:],]+#/var/lib/docker/overlayfs#g' \
                -e 's#/dev/mapper/[^[:space:],]+#/dev/sda1#g' \
                -e 's#/dev/root#/dev/sda1#g' \
@@ -237,7 +232,6 @@ fi
 
 # Clean up all inference setup variables so the running agent process cannot inspect them
 unset INFERENCE_PROVIDER INFERENCE_MODEL INFERENCE_BASE_URL INFERENCE_CONTEXT_WINDOW INFERENCE_MAX_TOKENS INFERENCE_API_KEY
-unset STRATA_GATEWAY_IP STRATA_PORT STRATA_MODEL STRATA_CONTEXT_WINDOW STRATA_MAX_TOKENS STRATA_API_KEY
 
 chown -R "$HOST_UID:$HOST_GID" /home/sandbox 2>/dev/null || true
 
